@@ -279,4 +279,243 @@ describe('Order-to-Audit Backend RBAC, Inventory Ledger, Production & Billing Wo
     expect(p2.status).toBe(201);
     expect(p2.data.paymentStatus).toBe('PAID');
   });
+
+  it('validates, stores, replaces, and removes product images securely in Product Catalogue', async () => {
+    // 1. Seeded products each have distinct corresponding images
+    const seededProds = (
+      await callApi(handler, 'GET', '/api/management/products', adminToken)
+    ).data as unknown as Array<{ id: string; name: string; imageUrl?: string }>;
+    const urls = seededProds.map((p) => p.imageUrl).filter(Boolean);
+    expect(urls.length).toBe(4);
+    expect(new Set(urls).size).toBe(4);
+
+    // 2. Rejects unsupported MIME type and mismatched magic bytes
+    const badMime = await callApi(
+      handler,
+      'POST',
+      '/api/management/products/image',
+      adminToken,
+      { mimeType: 'image/svg+xml', dataBase64: Buffer.from('<svg></svg>').toString('base64') }
+    );
+    expect(badMime.status).toBe(400);
+
+    const spoofedPng = await callApi(
+      handler,
+      'POST',
+      '/api/management/products/image',
+      adminToken,
+      { mimeType: 'image/png', dataBase64: Buffer.from('not-a-real-png-header').toString('base64') }
+    );
+    expect(spoofedPng.status).toBe(400);
+
+    // 3. Rejects oversized upload (> 2 MB)
+    const oversized = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]),
+      Buffer.alloc(2 * 1024 * 1024 + 64),
+    ]);
+    const bigRes = await callApi(
+      handler,
+      'POST',
+      '/api/management/products/image',
+      adminToken,
+      { mimeType: 'image/png', dataBase64: oversized.toString('base64') }
+    );
+    expect(bigRes.status).toBe(400);
+
+    // 4. Valid PNG upload -> saved with product -> replaced -> removed
+    const validPng = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+      0x52,
+    ]);
+    const up1 = await callApi(
+      handler,
+      'POST',
+      '/api/management/products/image',
+      adminToken,
+      { mimeType: 'image/png', dataBase64: validPng.toString('base64') }
+    );
+    expect(up1.status).toBe(201);
+    const imgUrl1 = String(up1.data.imageUrl);
+    expect(imgUrl1).toMatch(/^\/api\/uploads\/products\/prod-[a-f0-9-]+\.png$/);
+
+    const createRes = await callApi(handler, 'POST', '/api/management/products', adminToken, {
+      sku: 'NITT-THP-200',
+      name: 'Thattai 200 g',
+      packSize: '200 g',
+      sellingPrice: 42,
+      gstRate: 5,
+      hsnCode: '21069099',
+      imageUrl: imgUrl1,
+      unit: 'packets',
+      reorderLevel: 30,
+      bomItems: [{ materialId: 'rm-rice-flour', quantityPerUnit: 0.1 }],
+    });
+    expect(createRes.status).toBe(201);
+    const createdId = String(createRes.data.id);
+
+    // Remove image cleanly on update
+    const updRes = await callApi(
+      handler,
+      'PUT',
+      `/api/management/products/${createdId}`,
+      adminToken,
+      {
+        sku: 'NITT-THP-200',
+        name: 'Thattai 200 g',
+        packSize: '200 g',
+        sellingPrice: 42,
+        gstRate: 5,
+        hsnCode: '21069099',
+        imageUrl: '',
+        unit: 'packets',
+        reorderLevel: 30,
+        bomItems: [{ materialId: 'rm-rice-flour', quantityPerUnit: 0.1 }],
+      }
+    );
+    expect(updRes.status).toBe(200);
+
+    const afterList = (
+      await callApi(handler, 'GET', '/api/management/products', adminToken)
+    ).data as unknown as Array<{ id: string; imageUrl?: string }>;
+    expect(afterList.find((p) => p.id === createdId)?.imageUrl).toBeUndefined();
+  });
+
+  it('supports Salesman multi-product ordering, zero stock exposure, strict RBAC, and Admin Order Review integration', async () => {
+    const salesmanToken = String(
+      (
+        await callApi(handler, 'POST', '/api/auth/login', undefined, {
+          email: 'salesman@nitt.local',
+          password: 'password123',
+        })
+      ).data.token
+    );
+
+    // 1. Salesman product catalogue exposes product details & images but ZERO stock/reorder/BOM fields
+    const catRes = await callApi(handler, 'GET', '/api/salesman/products', salesmanToken);
+    expect(catRes.status).toBe(200);
+    const catProducts = catRes.data as unknown as Array<Record<string, unknown>>;
+    expect(catProducts.length).toBe(4);
+    for (const p of catProducts) {
+      expect(p).not.toHaveProperty('availableStock');
+      expect(p).not.toHaveProperty('reorderLevel');
+      expect(p).not.toHaveProperty('movementCount');
+      expect(p).not.toHaveProperty('bomItems');
+      expect(p.imageUrl).toBeTruthy();
+    }
+
+    // 2. Salesman is strictly blocked (403) from Admin, Supervisor, Accountant, Inventory, and Customer write endpoints
+    expect((await callApi(handler, 'GET', '/api/admin/dashboard', salesmanToken)).status).toBe(403);
+    expect((await callApi(handler, 'GET', '/api/orders', salesmanToken)).status).toBe(403);
+    expect((await callApi(handler, 'GET', '/api/inventory/items', salesmanToken)).status).toBe(403);
+    expect((await callApi(handler, 'GET', '/api/production-requests', salesmanToken)).status).toBe(403);
+    expect((await callApi(handler, 'GET', '/api/billing', salesmanToken)).status).toBe(403);
+    expect((await callApi(handler, 'GET', '/api/management/users', salesmanToken)).status).toBe(403);
+    expect(
+      (
+        await callApi(handler, 'POST', '/api/management/customers', salesmanToken, {
+          code: 'CUST-X',
+          name: 'Blocked',
+          contactPerson: 'X',
+          phone: '1',
+          billingAddress: 'A',
+          deliveryAddress: 'A',
+          state: 'Tamil Nadu',
+        })
+      ).status
+    ).toBe(403);
+    expect(
+      (await callApi(handler, 'GET', '/api/orders/ord-2026-0142/availability', salesmanToken)).status
+    ).toBe(403);
+    expect(
+      (
+        await callApi(handler, 'POST', '/api/orders/ord-2026-0142/decision', salesmanToken, {
+          decision: 'APPROVE_ORDER',
+        })
+      ).status
+    ).toBe(403);
+
+    // 3. Salesman cannot view another salesman's order (ord-2026-0141 belongs to usr-salesman-2)
+    const otherOrders = (await callApi(handler, 'GET', '/api/salesman/orders', salesmanToken))
+      .data as unknown as Array<{ id: string }>;
+    expect(otherOrders.some((o) => o.id === 'ord-2026-0141')).toBe(false);
+    expect(
+      (await callApi(handler, 'GET', '/api/salesman/orders/ord-2026-0141', salesmanToken)).status
+    ).toBe(403);
+
+    // 4. Salesman submits a multi-product order exceeding finished stock -> NOT blocked by stock!
+    const createOrderRes = await callApi(
+      handler,
+      'POST',
+      '/api/salesman/orders',
+      salesmanToken,
+      {
+        customerId: 'cust-04',
+        items: [
+          { productId: 'prod-mrk-200', quantity: 150 }, // FG stock 100 -> shortage 50
+          { productId: 'prod-mix-250', quantity: 80 },  // FG stock 60 -> shortage 20
+        ],
+        customerNote: 'Deliver before 4 PM to Amber Mess',
+      }
+    );
+    expect(createOrderRes.status).toBe(201);
+    const createdOrder = createOrderRes.data as unknown as {
+      id: string;
+      orderNumber: string;
+      status: string;
+      requestedQuantity: number;
+      subtotal: number;
+      items: Array<{ productId: string; requestedQuantity: number; lineTotal: number }>;
+    };
+    expect(createdOrder.status).toBe('SUBMITTED');
+    expect(createdOrder.requestedQuantity).toBe(230);
+    expect(createdOrder.subtotal).toBe(150 * 45 + 80 * 60);
+    expect(createdOrder.items).toHaveLength(2);
+
+    // 5. Appears in Admin Orders & evaluates multi-product availability + Send for Production
+    const adminOrders = (await callApi(handler, 'GET', '/api/orders', adminToken))
+      .data as unknown as Array<{ id: string; orderNumber: string; items: unknown[] }>;
+    const adminView = adminOrders.find((o) => o.id === createdOrder.id);
+    expect(adminView).toBeDefined();
+    expect(adminView?.items).toHaveLength(2);
+
+    const availRes = await callApi(
+      handler,
+      'GET',
+      `/api/orders/${createdOrder.id}/availability`,
+      adminToken
+    );
+    expect(availRes.status).toBe(200);
+    const avail = availRes.data as unknown as {
+      shortageQuantity: number;
+      productionRequired: boolean;
+      itemAnalyses: Array<{ productId: string; shortageQuantity: number }>;
+    };
+    expect(avail.productionRequired).toBe(true);
+    expect(avail.shortageQuantity).toBe(70);
+    expect(avail.itemAnalyses).toHaveLength(2);
+
+    const decisionRes = await callApi(
+      handler,
+      'POST',
+      `/api/orders/${createdOrder.id}/decision`,
+      adminToken,
+      {
+        decision: 'SEND_FOR_PRODUCTION',
+        note: 'INTERNAL ADMIN NOTE: high priority',
+      }
+    );
+    expect(decisionRes.status).toBe(200);
+
+    // 6. Salesman sees updated status & milestone without seeing internal Admin note
+    const salesmanDetailRes = await callApi(
+      handler,
+      'GET',
+      `/api/salesman/orders/${createdOrder.id}`,
+      salesmanToken
+    );
+    expect(salesmanDetailRes.status).toBe(200);
+    const detailText = JSON.stringify(salesmanDetailRes.data);
+    expect(detailText).toContain('PRODUCTION_REQUIRED');
+    expect(detailText).not.toContain('INTERNAL ADMIN NOTE');
+  });
 });

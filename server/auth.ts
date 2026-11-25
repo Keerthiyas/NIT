@@ -5,7 +5,8 @@ export type UserRole =
   | 'OWNER_SUPER_ADMIN'
   | 'ADMIN'
   | 'PRODUCTION_SUPERVISOR'
-  | 'ACCOUNTANT';
+  | 'ACCOUNTANT'
+  | 'SALESMAN';
 
 export interface AuthUser {
   id: string;

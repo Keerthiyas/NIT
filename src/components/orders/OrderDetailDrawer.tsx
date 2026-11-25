@@ -57,6 +57,7 @@ export function OrderDetailDrawer({
             <p className="mt-1 text-xs text-slate-500">
               {order.customerName} ({order.customerCode}) • Ordered{' '}
               {order.orderDate}
+              {order.salesmanName ? ` • Salesman: ${order.salesmanName}` : ''}
             </p>
           </div>
           <button
@@ -76,13 +77,15 @@ export function OrderDetailDrawer({
             <div>
               <p className="text-xs text-slate-500">Product</p>
               <p className="mt-0.5 font-medium text-slate-900">
-                {product?.name ?? order.productId}
+                {order.productName ?? product?.name ?? order.productId}
               </p>
             </div>
             <div>
               <p className="text-xs text-slate-500">SKU</p>
               <p className="mt-0.5 font-medium text-slate-700 tabular-nums">
-                {product?.sku ?? '—'}
+                {order.items && order.items.length > 1
+                  ? `${order.items.length} products`
+                  : product?.sku ?? '—'}
               </p>
             </div>
             <div>
@@ -97,6 +100,26 @@ export function OrderDetailDrawer({
                 {order.dispatchedQuantity} {product?.unit ?? 'units'}
               </p>
             </div>
+            {order.items && order.items.length > 1 && (
+              <div className="col-span-2 sm:col-span-4 border-t border-slate-100 pt-2.5">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+                  Order Line Items
+                </p>
+                <div className="divide-y divide-slate-100 rounded border border-slate-200 text-xs">
+                  {order.items.map((it) => (
+                    <div key={it.id} className="flex items-center justify-between px-3 py-1.5">
+                      <span className="font-medium text-slate-800">
+                        {it.productName} <span className="text-slate-400 font-mono">({it.sku})</span>
+                      </span>
+                      <span className="tabular-nums text-slate-700">
+                        {it.requestedQuantity} {it.unit} × ₹{it.unitPrice.toFixed(2)} ={' '}
+                        <strong>₹{it.lineTotal.toFixed(2)}</strong>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             {order.notes && (
               <div className="col-span-2 sm:col-span-4 border-t border-slate-100 pt-2.5 text-xs text-slate-600">
                 <span className="font-medium text-slate-700">Customer Note: </span>

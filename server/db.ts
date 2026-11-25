@@ -41,7 +41,7 @@ export function initializeSchema(db: DatabaseSync): void {
       username TEXT NOT NULL UNIQUE,
       full_name TEXT NOT NULL,
       email TEXT NOT NULL UNIQUE,
-      role TEXT NOT NULL CHECK(role IN ('OWNER_SUPER_ADMIN', 'ADMIN', 'PRODUCTION_SUPERVISOR', 'ACCOUNTANT')),
+      role TEXT NOT NULL CHECK(role IN ('OWNER_SUPER_ADMIN', 'ADMIN', 'PRODUCTION_SUPERVISOR', 'ACCOUNTANT', 'SALESMAN')),
       password_hash TEXT NOT NULL,
       is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
       must_reset_password INTEGER NOT NULL DEFAULT 0 CHECK(must_reset_password IN (0, 1)),
@@ -152,9 +152,11 @@ export function initializeSchema(db: DatabaseSync): void {
       id TEXT PRIMARY KEY,
       order_number TEXT NOT NULL UNIQUE,
       customer_id TEXT NOT NULL REFERENCES customers(id),
+      salesman_user_id TEXT REFERENCES users(id),
       product_id TEXT NOT NULL REFERENCES inventory_items(id),
       requested_qty_scaled INTEGER NOT NULL CHECK(requested_qty_scaled > 0),
       dispatched_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(dispatched_qty_scaled >= 0),
+      subtotal_paise INTEGER NOT NULL DEFAULT 0 CHECK(subtotal_paise >= 0),
       order_date TEXT NOT NULL,
       status TEXT NOT NULL CHECK(status IN (
         'SUBMITTED',
@@ -169,6 +171,22 @@ export function initializeSchema(db: DatabaseSync): void {
       notes TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS order_items (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      product_id TEXT NOT NULL REFERENCES inventory_items(id),
+      product_name TEXT NOT NULL,
+      sku TEXT NOT NULL,
+      pack_size TEXT NOT NULL DEFAULT '',
+      unit TEXT NOT NULL,
+      image_url TEXT NOT NULL DEFAULT '',
+      unit_price_paise INTEGER NOT NULL DEFAULT 0 CHECK(unit_price_paise >= 0),
+      gst_rate_bps INTEGER NOT NULL DEFAULT 0 CHECK(gst_rate_bps >= 0),
+      requested_qty_scaled INTEGER NOT NULL CHECK(requested_qty_scaled > 0),
+      dispatched_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(dispatched_qty_scaled >= 0),
+      UNIQUE(order_id, product_id)
     );
 
     CREATE TABLE IF NOT EXISTS order_audit_trail (
@@ -206,7 +224,7 @@ export function initializeSchema(db: DatabaseSync): void {
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_active_pr_per_order
-      ON production_requests(order_id)
+      ON production_requests(order_id, product_id)
       WHERE status != 'CANCELLED';
 
     CREATE TABLE IF NOT EXISTS material_shortage_queries (
@@ -378,6 +396,82 @@ export function initializeSchema(db: DatabaseSync): void {
   if (!itemColumns.some((c) => c.name === 'image_url')) {
     db.exec(`ALTER TABLE inventory_items ADD COLUMN image_url TEXT NOT NULL DEFAULT ''`);
   }
+
+  // Safe migration for users role CHECK constraint to include SALESMAN
+  const usersTableDef = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'`)
+    .get() as { sql: string } | undefined;
+  if (usersTableDef && !usersTableDef.sql.includes("'SALESMAN'")) {
+    db.exec(`PRAGMA foreign_keys = OFF;`);
+    db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE users_migrated (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        full_name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        role TEXT NOT NULL CHECK(role IN ('OWNER_SUPER_ADMIN', 'ADMIN', 'PRODUCTION_SUPERVISOR', 'ACCOUNTANT', 'SALESMAN')),
+        password_hash TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+        must_reset_password INTEGER NOT NULL DEFAULT 0 CHECK(must_reset_password IN (0, 1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO users_migrated SELECT * FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_migrated RENAME TO users;
+      COMMIT;
+    `);
+    db.exec(`PRAGMA foreign_keys = ON;`);
+  }
+
+  // Safe migration for orders columns (salesman_user_id, subtotal_paise)
+  const orderColumns = db
+    .prepare(`PRAGMA table_info(orders)`)
+    .all() as Array<{ name: string }>;
+  if (!orderColumns.some((c) => c.name === 'salesman_user_id')) {
+    db.exec(`ALTER TABLE orders ADD COLUMN salesman_user_id TEXT REFERENCES users(id)`);
+  }
+  if (!orderColumns.some((c) => c.name === 'subtotal_paise')) {
+    db.exec(`ALTER TABLE orders ADD COLUMN subtotal_paise INTEGER NOT NULL DEFAULT 0`);
+  }
+
+  // Ensure production_requests unique index allows multi-product orders (one active PR per order+product)
+  const idxDef = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_unique_active_pr_per_order'`)
+    .get() as { sql: string } | undefined;
+  if (idxDef && !idxDef.sql.includes('product_id')) {
+    db.exec(`DROP INDEX IF EXISTS idx_unique_active_pr_per_order;`);
+    db.exec(`
+      CREATE UNIQUE INDEX idx_unique_active_pr_per_order
+        ON production_requests(order_id, product_id)
+        WHERE status != 'CANCELLED';
+    `);
+  }
+
+  // Backfill order_items for any legacy single-product orders
+  db.exec(`
+    INSERT OR IGNORE INTO order_items (
+      id, order_id, product_id, product_name, sku, pack_size, unit, image_url,
+      unit_price_paise, gst_rate_bps, requested_qty_scaled, dispatched_qty_scaled
+    )
+    SELECT
+      'oi-' || o.id,
+      o.id,
+      o.product_id,
+      p.name,
+      p.sku,
+      p.pack_size,
+      p.unit,
+      p.image_url,
+      p.selling_price_paise,
+      p.gst_rate_bps,
+      o.requested_qty_scaled,
+      o.dispatched_qty_scaled
+    FROM orders o
+    JOIN inventory_items p ON p.id = o.product_id
+    WHERE NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = o.id);
+  `);
 }
 
 export function runInTransaction<T>(db: DatabaseSync, fn: () => T): T {

@@ -9,7 +9,10 @@ export type UserRole =
   | 'OWNER_SUPER_ADMIN'
   | 'ADMIN'
   | 'PRODUCTION_SUPERVISOR'
-  | 'ACCOUNTANT';
+  | 'ACCOUNTANT'
+  | 'SALESMAN';
+
+export type SalesmanNavSection = 'dashboard' | 'new-order' | 'my-orders';
 
 export interface AuthUser {
   id: string;
@@ -67,6 +70,21 @@ export interface OrderAuditEntry {
   note?: string;
 }
 
+export interface OrderLineItem {
+  id: string;
+  productId: string;
+  productName: string;
+  sku: string;
+  packSize: string;
+  unit: string;
+  imageUrl?: string;
+  unitPrice: number;
+  gstRate: number;
+  requestedQuantity: number;
+  dispatchedQuantity: number;
+  lineTotal: number;
+}
+
 export interface Order {
   id: string;
   orderNumber: string;
@@ -74,13 +92,18 @@ export interface Order {
   customerName: string;
   customerCode: string;
   customerState?: string;
+  salesmanUserId?: string;
+  salesmanName?: string;
   productId: string;
   productName?: string;
   productSku?: string;
   unit?: string;
   requestedQuantity: number;
   dispatchedQuantity: number;
+  subtotal?: number;
+  items?: OrderLineItem[];
   orderDate: string;
+  createdAt?: string;
   status: OrderStatus;
   notes?: string;
   auditTrail: OrderAuditEntry[];
@@ -104,6 +127,23 @@ export type RawMaterialAvailability =
   | 'INSUFFICIENT'
   | 'NOT_APPLICABLE';
 
+export interface OrderItemShortageAnalysis {
+  orderItemId: string;
+  productId: string;
+  productName: string;
+  sku: string;
+  unit: string;
+  imageUrl?: string;
+  requestedQuantity: number;
+  remainingToFulfill: number;
+  availableFinishedStock: number;
+  shortageQuantity: number;
+  productionRequired: boolean;
+  rawMaterialAvailability: RawMaterialAvailability;
+  bomBreakdown: BomRequirementLine[];
+  materialsRequiringPurchase: BomRequirementLine[];
+}
+
 export interface OrderShortageAnalysis {
   orderId: string;
   productId: string;
@@ -117,6 +157,7 @@ export interface OrderShortageAnalysis {
   rawMaterialAvailability: RawMaterialAvailability;
   bomBreakdown: BomRequirementLine[];
   materialsRequiringPurchase: BomRequirementLine[];
+  itemAnalyses?: OrderItemShortageAnalysis[];
   checkedAt: string;
 }
 
@@ -527,4 +568,66 @@ export interface ManagedUser {
   mustResetPassword: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+// --- Salesman Portal (Zero Inventory / BOM / Costing Exposure) ---
+
+export interface SalesmanProduct {
+  id: string;
+  sku: string;
+  name: string;
+  packSize: string;
+  unit: string;
+  sellingPrice: number;
+  gstRate: number;
+  hsnCode: string;
+  imageUrl?: string;
+}
+
+export interface SalesmanCustomer {
+  id: string;
+  code: string;
+  name: string;
+  contactPerson: string;
+  phone: string;
+  email: string;
+  billingAddress: string;
+  deliveryAddress: string;
+  state: string;
+}
+
+export interface SalesmanOrderProgress {
+  id: string;
+  timestamp: string;
+  action: string;
+  fromStatus?: OrderStatus;
+  toStatus: OrderStatus;
+}
+
+export interface SalesmanOrder {
+  id: string;
+  orderNumber: string;
+  customerId: string;
+  customerName: string;
+  customerCode: string;
+  customerContact: string;
+  customerPhone: string;
+  deliveryAddress: string;
+  customerState: string;
+  requestedQuantity: number;
+  dispatchedQuantity: number;
+  subtotal: number;
+  orderDate: string;
+  createdAt: string;
+  status: OrderStatus;
+  productionStage?: 'AWAITING_MATERIALS' | 'IN_PROGRESS' | 'READY_FOR_DISPATCH';
+  customerNote?: string;
+  items: OrderLineItem[];
+  progressUpdates: SalesmanOrderProgress[];
+}
+
+export interface SalesmanDashboardData {
+  totalOrdersCount: number;
+  pendingOrdersCount: number;
+  recentOrders: SalesmanOrder[];
 }

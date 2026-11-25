@@ -29,6 +29,24 @@ export function seedDatabaseIfEmpty(db: DatabaseSync): void {
       upd.run('/api/uploads/products/masala-peanuts-150g.png', 'prod-pnt-150');
       upd.run('/api/uploads/products/ribbon-pakoda-200g.png', 'prod-rib-200');
     }
+
+    // Backfill Salesman users into existing databases if missing
+    const hasSalesman = db
+      .prepare(`SELECT COUNT(*) AS cnt FROM users WHERE role = 'SALESMAN'`)
+      .get() as { cnt: number };
+    if (hasSalesman.cnt === 0) {
+      const now = '2026-11-25T09:00:00.000Z';
+      const defaultPasswordHash = hashPassword('password123');
+      const ins = db.prepare(`
+        INSERT OR IGNORE INTO users (id, username, full_name, email, role, password_hash, is_active, must_reset_password, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'SALESMAN', ?, 1, 0, ?, ?)
+      `);
+      ins.run('usr-salesman', 'salesman', 'Arun Kumar (Salesman)', 'salesman@nitt.local', defaultPasswordHash, now, now);
+      ins.run('usr-salesman-2', 'salesman2', 'Priya Dharshini (Salesman)', 'salesman2@nitt.local', defaultPasswordHash, now, now);
+
+      db.prepare(`UPDATE orders SET salesman_user_id = 'usr-salesman' WHERE id IN ('ord-2026-0142', 'ord-2026-0143', 'ord-2026-0144') AND salesman_user_id IS NULL`).run();
+      db.prepare(`UPDATE orders SET salesman_user_id = 'usr-salesman-2' WHERE id = 'ord-2026-0141' AND salesman_user_id IS NULL`).run();
+    }
     return;
   }
 
@@ -36,7 +54,7 @@ export function seedDatabaseIfEmpty(db: DatabaseSync): void {
     const now = '2026-11-25T09:00:00.000Z';
     const defaultPasswordHash = hashPassword('password123');
 
-    // 1. Seed Users across all 4 roles
+    // 1. Seed Users across all 5 roles
     const insertUser = db.prepare(`
       INSERT INTO users (id, username, full_name, email, role, password_hash, is_active, must_reset_password, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, ?)
@@ -45,6 +63,8 @@ export function seedDatabaseIfEmpty(db: DatabaseSync): void {
     insertUser.run('usr-admin', 'admin', 'Meenakshi Sundaram (Admin)', 'admin@nitt.local', 'ADMIN', defaultPasswordHash, now, now);
     insertUser.run('usr-supervisor', 'supervisor', 'Karthik Raja (Supervisor)', 'supervisor@nitt.local', 'PRODUCTION_SUPERVISOR', defaultPasswordHash, now, now);
     insertUser.run('usr-accountant', 'accountant', 'Lakshmi Narayanan (Accountant)', 'accountant@nitt.local', 'ACCOUNTANT', defaultPasswordHash, now, now);
+    insertUser.run('usr-salesman', 'salesman', 'Arun Kumar (Salesman)', 'salesman@nitt.local', 'SALESMAN', defaultPasswordHash, now, now);
+    insertUser.run('usr-salesman-2', 'salesman2', 'Priya Dharshini (Salesman)', 'salesman2@nitt.local', 'SALESMAN', defaultPasswordHash, now, now);
 
     // 2. Seed Customers (Tamil Nadu intra-state + Karnataka inter-state)
     const insertCust = db.prepare(`
@@ -186,10 +206,18 @@ export function seedDatabaseIfEmpty(db: DatabaseSync): void {
     seedBom('prod-rib-200', 'rm-spice-mix', 0.01);
     seedBom('prod-rib-200', 'pkg-pouch-200', 1);
 
-    // 6. Seed Orders
+    // 6. Seed Orders (plus order_items snapshots)
     const insertOrder = db.prepare(`
-      INSERT INTO orders (id, order_number, customer_id, product_id, requested_qty_scaled, dispatched_qty_scaled, order_date, status, notes, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO orders (id, order_number, customer_id, salesman_user_id, product_id, requested_qty_scaled, dispatched_qty_scaled, subtotal_paise, order_date, status, notes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertOrderItem = db.prepare(`
+      INSERT INTO order_items (
+        id, order_id, product_id, product_name, sku, pack_size, unit, image_url,
+        unit_price_paise, gst_rate_bps, requested_qty_scaled, dispatched_qty_scaled
+      )
+      SELECT ?, ?, id, name, sku, pack_size, unit, image_url, selling_price_paise, gst_rate_bps, ?, ?
+      FROM inventory_items WHERE id = ?
     `);
     const insertOrderAudit = db.prepare(`
       INSERT INTO order_audit_trail (id, order_id, timestamp, actor_user_id, actor_name, action, from_status, to_status, note)
@@ -197,37 +225,45 @@ export function seedDatabaseIfEmpty(db: DatabaseSync): void {
     `);
 
     // ORD-2026-0142: Murukku 200 g, 150 requested, 100 in stock -> 50 shortage (raw/pkg sufficient)
-    insertOrder.run('ord-2026-0142', 'ORD-2026-0142', 'cust-04', 'prod-mrk-200', toScaledQty(150), 0, '2026-11-25', 'SUBMITTED', 'Weekly student hostel canteen indent.', '2026-11-25T09:15:00.000Z', '2026-11-25T09:15:00.000Z');
-    insertOrderAudit.run('aud-142-1', 'ord-2026-0142', '2026-11-25T09:15:00.000Z', 'portal', 'Customer Portal', 'Order submitted by NITT Hostels – Amber Mess', null, 'SUBMITTED', '');
+    insertOrder.run('ord-2026-0142', 'ORD-2026-0142', 'cust-04', 'usr-salesman', 'prod-mrk-200', toScaledQty(150), 0, toPaise(150 * 45), '2026-11-25', 'SUBMITTED', 'Weekly student hostel canteen indent.', '2026-11-25T09:15:00.000Z', '2026-11-25T09:15:00.000Z');
+    insertOrderItem.run('oi-142-1', 'ord-2026-0142', toScaledQty(150), 0, 'prod-mrk-200');
+    insertOrderAudit.run('aud-142-1', 'ord-2026-0142', '2026-11-25T09:15:00.000Z', 'usr-salesman', 'Arun Kumar (Salesman)', 'Order submitted by Arun Kumar (Salesman)', null, 'SUBMITTED', '');
 
     // ORD-2026-0143: Madras Mixture 250 g, 200 requested, 60 in stock -> 140 shortage (Besan, Peanuts, Pouch 250g insufficient!)
-    insertOrder.run('ord-2026-0143', 'ORD-2026-0143', 'cust-01', 'prod-mix-250', toScaledQty(200), 0, '2026-11-25', 'UNDER_REVIEW', 'Symposium refreshment requirement.', '2026-11-25T09:40:00.000Z', '2026-11-25T10:10:00.000Z');
+    insertOrder.run('ord-2026-0143', 'ORD-2026-0143', 'cust-01', 'usr-salesman', 'prod-mix-250', toScaledQty(200), 0, toPaise(200 * 60), '2026-11-25', 'UNDER_REVIEW', 'Symposium refreshment requirement.', '2026-11-25T09:40:00.000Z', '2026-11-25T10:10:00.000Z');
+    insertOrderItem.run('oi-143-1', 'ord-2026-0143', toScaledQty(200), 0, 'prod-mix-250');
     insertOrderAudit.run('aud-143-2', 'ord-2026-0143', '2026-11-25T10:10:00.000Z', 'usr-admin', 'Admin', 'Opened for availability review', 'SUBMITTED', 'UNDER_REVIEW', '');
-    insertOrderAudit.run('aud-143-1', 'ord-2026-0143', '2026-11-25T09:40:00.000Z', 'portal', 'Customer Portal', 'Order submitted by NITT Central Canteen', null, 'SUBMITTED', '');
+    insertOrderAudit.run('aud-143-1', 'ord-2026-0143', '2026-11-25T09:40:00.000Z', 'usr-salesman', 'Arun Kumar (Salesman)', 'Order submitted by Arun Kumar (Salesman)', null, 'SUBMITTED', '');
 
     // ORD-2026-0144: Masala Peanuts 150 g, 50 requested, 120 in stock -> sufficient
-    insertOrder.run('ord-2026-0144', 'ORD-2026-0144', 'cust-09', 'prod-pnt-150', toScaledQty(50), 0, '2026-11-24', 'SUBMITTED', 'Standard shelf replenishment.', '2026-11-24T16:20:00.000Z', '2026-11-24T16:20:00.000Z');
-    insertOrderAudit.run('aud-144-1', 'ord-2026-0144', '2026-11-24T16:20:00.000Z', 'portal', 'Customer Portal', 'Order submitted by Orion Student Cooperative', null, 'SUBMITTED', '');
+    insertOrder.run('ord-2026-0144', 'ORD-2026-0144', 'cust-09', 'usr-salesman', 'prod-pnt-150', toScaledQty(50), 0, toPaise(50 * 35), '2026-11-24', 'SUBMITTED', 'Standard shelf replenishment.', '2026-11-24T16:20:00.000Z', '2026-11-24T16:20:00.000Z');
+    insertOrderItem.run('oi-144-1', 'ord-2026-0144', toScaledQty(50), 0, 'prod-pnt-150');
+    insertOrderAudit.run('aud-144-1', 'ord-2026-0144', '2026-11-24T16:20:00.000Z', 'usr-salesman', 'Arun Kumar (Salesman)', 'Order submitted by Arun Kumar (Salesman)', null, 'SUBMITTED', '');
 
-    // ORD-2026-0141: Ribbon Pakoda 200 g, 85 requested, 25 in stock -> 60 PR-2026-0001
-    insertOrder.run('ord-2026-0141', 'ORD-2026-0141', 'cust-06', 'prod-rib-200', toScaledQty(85), 0, '2026-11-24', 'PRODUCTION_REQUIRED', '60 packets queued for production batch.', '2026-11-24T11:30:00.000Z', '2026-11-24T14:05:00.000Z');
+    // ORD-2026-0141: Ribbon Pakoda 200 g, 85 requested, 25 in stock -> 60 PR-2026-0001 (belongs to usr-salesman-2)
+    insertOrder.run('ord-2026-0141', 'ORD-2026-0141', 'cust-06', 'usr-salesman-2', 'prod-rib-200', toScaledQty(85), 0, toPaise(85 * 50), '2026-11-24', 'PRODUCTION_REQUIRED', '60 packets queued for production batch.', '2026-11-24T11:30:00.000Z', '2026-11-24T14:05:00.000Z');
+    insertOrderItem.run('oi-141-1', 'ord-2026-0141', toScaledQty(85), 0, 'prod-rib-200');
     insertOrderAudit.run('aud-141-2', 'ord-2026-0141', '2026-11-24T14:05:00.000Z', 'usr-admin', 'Admin', 'Sent shortage (60 packets) for production (PR-2026-0001)', 'SUBMITTED', 'PRODUCTION_REQUIRED', '');
-    insertOrderAudit.run('aud-141-1', 'ord-2026-0141', '2026-11-24T11:30:00.000Z', 'portal', 'Customer Portal', 'Order submitted by Aquamarine Mess Committee', null, 'SUBMITTED', '');
+    insertOrderAudit.run('aud-141-1', 'ord-2026-0141', '2026-11-24T11:30:00.000Z', 'usr-salesman-2', 'Priya Dharshini (Salesman)', 'Order submitted by Priya Dharshini (Salesman)', null, 'SUBMITTED', '');
 
     // ORD-2026-0140: Faculty Club Store, Masala Peanuts 150 g, 60 packets, APPROVED (awaiting dispatch)
-    insertOrder.run('ord-2026-0140', 'ORD-2026-0140', 'cust-03', 'prod-pnt-150', toScaledQty(60), 0, '2026-11-23', 'APPROVED', 'Approved; awaiting dispatch voucher.', '2026-11-23T12:00:00.000Z', '2026-11-23T15:00:00.000Z');
+    insertOrder.run('ord-2026-0140', 'ORD-2026-0140', 'cust-03', null, 'prod-pnt-150', toScaledQty(60), 0, toPaise(60 * 35), '2026-11-23', 'APPROVED', 'Approved; awaiting dispatch voucher.', '2026-11-23T12:00:00.000Z', '2026-11-23T15:00:00.000Z');
+    insertOrderItem.run('oi-140-1', 'ord-2026-0140', toScaledQty(60), 0, 'prod-pnt-150');
     insertOrderAudit.run('aud-140-2', 'ord-2026-0140', '2026-11-23T15:00:00.000Z', 'usr-admin', 'Admin', 'Approved order (inventory unchanged until dispatch)', 'SUBMITTED', 'APPROVED', '');
 
     // ORD-2026-0139: Diamond Hostel Canteen, Murukku 200 g, 80 packets, DISPATCHED + Invoiced (CGST+SGST) + Partial Payment
-    insertOrder.run('ord-2026-0139', 'ORD-2026-0139', 'cust-02', 'prod-mrk-200', toScaledQty(80), toScaledQty(80), '2026-11-22', 'DISPATCHED', 'Dispatched via Gate Pass GP-884.', '2026-11-22T10:00:00.000Z', '2026-11-22T17:10:00.000Z');
+    insertOrder.run('ord-2026-0139', 'ORD-2026-0139', 'cust-02', null, 'prod-mrk-200', toScaledQty(80), toScaledQty(80), toPaise(80 * 45), '2026-11-22', 'DISPATCHED', 'Dispatched via Gate Pass GP-884.', '2026-11-22T10:00:00.000Z', '2026-11-22T17:10:00.000Z');
+    insertOrderItem.run('oi-139-1', 'ord-2026-0139', toScaledQty(80), toScaledQty(80), 'prod-mrk-200');
     insertOrderAudit.run('aud-139-2', 'ord-2026-0139', '2026-11-22T17:10:00.000Z', 'usr-admin', 'Dispatch Desk', 'Full quantity (80 packets) dispatched; stock updated', 'APPROVED', 'DISPATCHED', '');
 
     // ORD-2026-0138: Bengaluru Alumni Store, Masala Peanuts 150 g, 40 packets, DISPATCHED + Invoiced (IGST)
-    insertOrder.run('ord-2026-0138', 'ORD-2026-0138', 'cust-10', 'prod-pnt-150', toScaledQty(40), toScaledQty(40), '2026-11-21', 'DISPATCHED', 'Inter-state dispatch via parcel courier.', '2026-11-21T09:00:00.000Z', '2026-11-21T16:30:00.000Z');
+    insertOrder.run('ord-2026-0138', 'ORD-2026-0138', 'cust-10', null, 'prod-pnt-150', toScaledQty(40), toScaledQty(40), toPaise(40 * 35), '2026-11-21', 'DISPATCHED', 'Inter-state dispatch via parcel courier.', '2026-11-21T09:00:00.000Z', '2026-11-21T16:30:00.000Z');
+    insertOrderItem.run('oi-138-1', 'ord-2026-0138', toScaledQty(40), toScaledQty(40), 'prod-pnt-150');
     insertOrderAudit.run('aud-138-2', 'ord-2026-0138', '2026-11-21T16:30:00.000Z', 'usr-admin', 'Dispatch Desk', 'Full quantity (40 packets) dispatched; stock updated', 'APPROVED', 'DISPATCHED', '');
 
     // ORD-2026-0137: Historical completed production + dispatched order for Production Monitoring visibility
-    insertOrder.run('ord-2026-0137', 'ORD-2026-0137', 'cust-01', 'prod-mrk-200', toScaledQty(100), toScaledQty(100), '2026-11-20', 'DISPATCHED', 'Prior batch completed and dispatched.', '2026-11-20T09:00:00.000Z', '2026-11-20T18:00:00.000Z');
+    insertOrder.run('ord-2026-0137', 'ORD-2026-0137', 'cust-01', null, 'prod-mrk-200', toScaledQty(100), toScaledQty(100), toPaise(100 * 45), '2026-11-20', 'DISPATCHED', 'Prior batch completed and dispatched.', '2026-11-20T09:00:00.000Z', '2026-11-20T18:00:00.000Z');
+    insertOrderItem.run('oi-137-1', 'ord-2026-0137', toScaledQty(100), toScaledQty(100), 'prod-mrk-200');
 
     // 7. Seed Production Requests (1 active pending, 1 completed)
     const insertPr = db.prepare(`

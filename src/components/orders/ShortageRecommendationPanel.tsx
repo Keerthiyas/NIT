@@ -89,6 +89,57 @@ export function ShortageRecommendationPanel({
             </dd>
           </div>
         </dl>
+
+        {analysis.itemAnalyses && analysis.itemAnalyses.length > 1 && (
+          <div className="mt-3 overflow-x-auto rounded-md border border-slate-200 bg-white">
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-slate-200 bg-slate-50 text-slate-500">
+                <tr>
+                  <th className="px-3 py-1.5">Product</th>
+                  <th className="px-3 py-1.5 text-right">Requested</th>
+                  <th className="px-3 py-1.5 text-right">FG Stock</th>
+                  <th className="px-3 py-1.5 text-right">Shortage</th>
+                  <th className="px-3 py-1.5">Materials</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {analysis.itemAnalyses.map((item) => (
+                  <tr key={item.orderItemId}>
+                    <td className="px-3 py-1.5 font-medium text-slate-800">
+                      {item.productName}
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">
+                      {item.requestedQuantity} {item.unit}
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">
+                      {item.availableFinishedStock} {item.unit}
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums font-semibold">
+                      {item.shortageQuantity} {item.unit}
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <ToneBadge
+                        tone={
+                          !item.productionRequired
+                            ? 'success'
+                            : item.rawMaterialAvailability === 'SUFFICIENT'
+                              ? 'navy'
+                              : 'danger'
+                        }
+                      >
+                        {!item.productionRequired
+                          ? 'In Stock'
+                          : item.rawMaterialAvailability === 'SUFFICIENT'
+                            ? 'Sufficient'
+                            : 'Insufficient'}
+                      </ToneBadge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* 2. Production & BOM Recommendation (Option A) */}

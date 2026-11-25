@@ -42,11 +42,15 @@ export function OrdersPageView({
         return false;
       }
       if (!query) return true;
-      const productName = productMap.get(order.productId)?.name ?? '';
+      const productName = order.productName ?? productMap.get(order.productId)?.name ?? '';
+      const hasItemMatch = order.items?.some((it) =>
+        it.productName.toLowerCase().includes(query)
+      );
       return (
         order.orderNumber.toLowerCase().includes(query) ||
         order.customerName.toLowerCase().includes(query) ||
-        productName.toLowerCase().includes(query)
+        productName.toLowerCase().includes(query) ||
+        Boolean(hasItemMatch)
       );
     });
   }, [orders, productMap, searchQuery, statusFilter]);
@@ -123,7 +127,7 @@ export function OrdersPageView({
                       </p>
                     </td>
                     <td className="px-4 py-3 text-slate-700 whitespace-nowrap">
-                      {product?.name ?? order.productId}
+                      {order.productName ?? product?.name ?? order.productId}
                     </td>
                     <td className="px-4 py-3 text-right font-medium tabular-nums text-slate-900 whitespace-nowrap">
                       {order.requestedQuantity} {unit}

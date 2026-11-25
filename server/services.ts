@@ -186,7 +186,7 @@ function applyStockMovement(db: DatabaseSync, params: StockMovementParams): numb
 }
 
 /**
- * Evaluates shortage for a customer order using live stock_balances and BOM.
+ * Evaluates shortage for a customer order (single or multi-product) using live stock_balances and BOM.
  */
 export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
   const orderRow = db
@@ -217,99 +217,246 @@ export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
     throw new HttpError(404, `Order ${orderId} not found.`);
   }
 
-  const remainingScaled = Math.max(
-    0,
-    orderRow.requested_qty_scaled - orderRow.dispatched_qty_scaled
-  );
-  const availableScaled = Math.max(0, orderRow.fg_stock_scaled);
-  const shortageScaled = Math.max(0, remainingScaled - availableScaled);
-  const productionRequired = shortageScaled > 0;
-  const checkedAt = new Date().toISOString();
-
-  if (!productionRequired) {
-    return {
-      orderId: orderRow.id,
-      productId: orderRow.product_id,
-      productName: orderRow.product_name,
-      unit: orderRow.product_unit,
-      requestedQuantity: fromScaledQty(orderRow.requested_qty_scaled),
-      remainingToFulfill: fromScaledQty(remainingScaled),
-      availableFinishedStock: fromScaledQty(availableScaled),
-      shortageQuantity: 0,
-      productionRequired: false,
-      rawMaterialAvailability: 'NOT_APPLICABLE' as const,
-      bomBreakdown: [],
-      materialsRequiringPurchase: [],
-      checkedAt,
-    };
-  }
-
-  const bomRows = db
+  const itemRows = db
     .prepare(
-      `SELECT b.material_id, b.quantity_per_unit_scaled,
-              m.sku AS material_code, m.name AS material_name, m.unit, m.category,
-              sb.quantity_scaled AS available_scaled
-       FROM bom_items b
-       JOIN inventory_items m ON m.id = b.material_id
-       JOIN stock_balances sb ON sb.item_id = m.id
-       WHERE b.product_id = ?
-       ORDER BY m.category, m.name`
+      `SELECT oi.id, oi.product_id, oi.product_name, oi.sku, oi.unit, oi.image_url,
+              oi.requested_qty_scaled, oi.dispatched_qty_scaled,
+              sb.quantity_scaled AS fg_stock_scaled
+       FROM order_items oi
+       JOIN stock_balances sb ON sb.item_id = oi.product_id
+       WHERE oi.order_id = ?
+       ORDER BY oi.rowid ASC`
     )
-    .all(orderRow.product_id) as Array<{
-    material_id: string;
-    quantity_per_unit_scaled: number;
-    material_code: string;
-    material_name: string;
+    .all(orderId) as Array<{
+    id: string;
+    product_id: string;
+    product_name: string;
+    sku: string;
     unit: string;
-    category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
-    available_scaled: number;
+    image_url: string;
+    requested_qty_scaled: number;
+    dispatched_qty_scaled: number;
+    fg_stock_scaled: number;
   }>;
 
-  const bomBreakdown = bomRows.map((row) => {
-    // shortageScaled and quantity_per_unit_scaled are both scaled by 10000
-    const requiredScaled = Math.round(
-      (shortageScaled * row.quantity_per_unit_scaled) / 10000
-    );
-    const matAvailableScaled = Math.max(0, row.available_scaled);
-    const shortfallScaled = Math.max(0, requiredScaled - matAvailableScaled);
+  const effectiveItems =
+    itemRows.length > 0
+      ? itemRows
+      : [
+          {
+            id: `oi-${orderRow.id}`,
+            product_id: orderRow.product_id,
+            product_name: orderRow.product_name,
+            sku: '',
+            unit: orderRow.product_unit,
+            image_url: '',
+            requested_qty_scaled: orderRow.requested_qty_scaled,
+            dispatched_qty_scaled: orderRow.dispatched_qty_scaled,
+            fg_stock_scaled: orderRow.fg_stock_scaled,
+          },
+        ];
+
+  const bomStmt = db.prepare(
+    `SELECT b.material_id, b.quantity_per_unit_scaled,
+            m.sku AS material_code, m.name AS material_name, m.unit, m.category,
+            sb.quantity_scaled AS available_scaled
+     FROM bom_items b
+     JOIN inventory_items m ON m.id = b.material_id
+     JOIN stock_balances sb ON sb.item_id = m.id
+     WHERE b.product_id = ?
+     ORDER BY m.category, m.name`
+  );
+
+  const checkedAt = new Date().toISOString();
+
+  // Track aggregated BOM demand across all shortage items in the order
+  const aggregatedBomMap = new Map<
+    string,
+    {
+      rawMaterialId: string;
+      materialCode: string;
+      materialName: string;
+      category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+      unit: string;
+      quantityPerUnit: number;
+      requiredScaled: number;
+      availableScaled: number;
+    }
+  >();
+
+  const itemAnalyses = effectiveItems.map((item) => {
+    const remainingScaled = Math.max(0, item.requested_qty_scaled - item.dispatched_qty_scaled);
+    const availableScaled = Math.max(0, item.fg_stock_scaled);
+    const shortageScaled = Math.max(0, remainingScaled - availableScaled);
+    const productionRequired = shortageScaled > 0;
+
+    if (!productionRequired) {
+      return {
+        orderItemId: item.id,
+        productId: item.product_id,
+        productName: item.product_name,
+        sku: item.sku,
+        unit: item.unit,
+        imageUrl: item.image_url || undefined,
+        requestedQuantity: fromScaledQty(item.requested_qty_scaled),
+        remainingToFulfill: fromScaledQty(remainingScaled),
+        availableFinishedStock: fromScaledQty(availableScaled),
+        shortageQuantity: 0,
+        productionRequired: false,
+        rawMaterialAvailability: 'NOT_APPLICABLE' as const,
+        bomBreakdown: [],
+        materialsRequiringPurchase: [],
+        _internalBom: [] as Array<{
+          rawMaterialId: string;
+          materialCode: string;
+          materialName: string;
+          category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+          unit: string;
+          quantityPerUnit: number;
+          requiredQuantity: number;
+          availableStock: number;
+          shortfallQuantity: number;
+          isSufficient: boolean;
+          _requiredScaled: number;
+          _availableScaled: number;
+          _shortfallScaled: number;
+        }>,
+      };
+    }
+
+    const bomRows = bomStmt.all(item.product_id) as Array<{
+      material_id: string;
+      quantity_per_unit_scaled: number;
+      material_code: string;
+      material_name: string;
+      unit: string;
+      category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+      available_scaled: number;
+    }>;
+
+    const itemBom = bomRows.map((row) => {
+      const requiredScaled = Math.round(
+        (shortageScaled * row.quantity_per_unit_scaled) / 10000
+      );
+      const matAvailableScaled = Math.max(0, row.available_scaled);
+      const shortfallScaled = Math.max(0, requiredScaled - matAvailableScaled);
+
+      const existingAgg = aggregatedBomMap.get(row.material_id);
+      if (existingAgg) {
+        existingAgg.requiredScaled += requiredScaled;
+      } else {
+        aggregatedBomMap.set(row.material_id, {
+          rawMaterialId: row.material_id,
+          materialCode: row.material_code,
+          materialName: row.material_name,
+          category: row.category,
+          unit: row.unit,
+          quantityPerUnit: fromScaledQty(row.quantity_per_unit_scaled),
+          requiredScaled,
+          availableScaled: matAvailableScaled,
+        });
+      }
+
+      return {
+        rawMaterialId: row.material_id,
+        materialCode: row.material_code,
+        materialName: row.material_name,
+        category: row.category,
+        unit: row.unit,
+        quantityPerUnit: fromScaledQty(row.quantity_per_unit_scaled),
+        requiredQuantity: fromScaledQty(requiredScaled),
+        availableStock: fromScaledQty(matAvailableScaled),
+        shortfallQuantity: fromScaledQty(shortfallScaled),
+        isSufficient: shortfallScaled === 0,
+        _requiredScaled: requiredScaled,
+        _availableScaled: matAvailableScaled,
+        _shortfallScaled: shortfallScaled,
+      };
+    });
+
+    const itemPurchase = itemBom.filter((b) => !b.isSufficient);
     return {
-      rawMaterialId: row.material_id,
-      materialCode: row.material_code,
-      materialName: row.material_name,
-      category: row.category,
-      unit: row.unit,
-      quantityPerUnit: fromScaledQty(row.quantity_per_unit_scaled),
-      requiredQuantity: fromScaledQty(requiredScaled),
-      availableStock: fromScaledQty(matAvailableScaled),
+      orderItemId: item.id,
+      productId: item.product_id,
+      productName: item.product_name,
+      sku: item.sku,
+      unit: item.unit,
+      imageUrl: item.image_url || undefined,
+      requestedQuantity: fromScaledQty(item.requested_qty_scaled),
+      remainingToFulfill: fromScaledQty(remainingScaled),
+      availableFinishedStock: fromScaledQty(availableScaled),
+      shortageQuantity: fromScaledQty(shortageScaled),
+      productionRequired: true,
+      rawMaterialAvailability:
+        itemPurchase.length === 0 ? ('SUFFICIENT' as const) : ('INSUFFICIENT' as const),
+      bomBreakdown: itemBom.map(
+        ({ _requiredScaled, _availableScaled, _shortfallScaled, ...rest }) => rest
+      ),
+      materialsRequiringPurchase: itemPurchase.map(
+        ({ _requiredScaled, _availableScaled, _shortfallScaled, ...rest }) => rest
+      ),
+      _internalBom: itemBom,
+    };
+  });
+
+  const totalRequested = itemAnalyses.reduce((sum, i) => sum + i.requestedQuantity, 0);
+  const totalRemaining = itemAnalyses.reduce((sum, i) => sum + i.remainingToFulfill, 0);
+  const totalAvailable = itemAnalyses.reduce((sum, i) => sum + i.availableFinishedStock, 0);
+  const totalShortage = itemAnalyses.reduce((sum, i) => sum + i.shortageQuantity, 0);
+  const anyProductionRequired = itemAnalyses.some((i) => i.productionRequired);
+
+  const aggregatedBom = Array.from(aggregatedBomMap.values()).map((agg) => {
+    const shortfallScaled = Math.max(0, agg.requiredScaled - agg.availableScaled);
+    return {
+      rawMaterialId: agg.rawMaterialId,
+      materialCode: agg.materialCode,
+      materialName: agg.materialName,
+      category: agg.category,
+      unit: agg.unit,
+      quantityPerUnit: agg.quantityPerUnit,
+      requiredQuantity: fromScaledQty(agg.requiredScaled),
+      availableStock: fromScaledQty(agg.availableScaled),
       shortfallQuantity: fromScaledQty(shortfallScaled),
       isSufficient: shortfallScaled === 0,
-      _requiredScaled: requiredScaled,
-      _availableScaled: matAvailableScaled,
+      _requiredScaled: agg.requiredScaled,
+      _availableScaled: agg.availableScaled,
       _shortfallScaled: shortfallScaled,
     };
   });
 
-  const materialsRequiringPurchase = bomBreakdown.filter((b) => !b.isSufficient);
-  const rawMaterialAvailability =
-    materialsRequiringPurchase.length === 0 ? ('SUFFICIENT' as const) : ('INSUFFICIENT' as const);
+  const aggregatedPurchase = aggregatedBom.filter((b) => !b.isSufficient);
+  const overallRawAvailability = !anyProductionRequired
+    ? ('NOT_APPLICABLE' as const)
+    : aggregatedPurchase.length === 0
+      ? ('SUFFICIENT' as const)
+      : ('INSUFFICIENT' as const);
+
+  const summaryProductName =
+    itemAnalyses.length > 1
+      ? `${itemAnalyses[0].productName} (+${itemAnalyses.length - 1} more)`
+      : orderRow.product_name;
 
   return {
     orderId: orderRow.id,
     productId: orderRow.product_id,
-    productName: orderRow.product_name,
+    productName: summaryProductName,
     unit: orderRow.product_unit,
-    requestedQuantity: fromScaledQty(orderRow.requested_qty_scaled),
-    remainingToFulfill: fromScaledQty(remainingScaled),
-    availableFinishedStock: fromScaledQty(availableScaled),
-    shortageQuantity: fromScaledQty(shortageScaled),
-    productionRequired: true,
-    rawMaterialAvailability,
-    bomBreakdown: bomBreakdown.map(({ _requiredScaled, _availableScaled, _shortfallScaled, ...rest }) => rest),
-    materialsRequiringPurchase: materialsRequiringPurchase.map(
+    requestedQuantity: totalRequested,
+    remainingToFulfill: totalRemaining,
+    availableFinishedStock: totalAvailable,
+    shortageQuantity: totalShortage,
+    productionRequired: anyProductionRequired,
+    rawMaterialAvailability: overallRawAvailability,
+    bomBreakdown: aggregatedBom.map(
       ({ _requiredScaled, _availableScaled, _shortfallScaled, ...rest }) => rest
     ),
+    materialsRequiringPurchase: aggregatedPurchase.map(
+      ({ _requiredScaled, _availableScaled, _shortfallScaled, ...rest }) => rest
+    ),
+    itemAnalyses: itemAnalyses.map(({ _internalBom, ...rest }) => rest),
     checkedAt,
-    _internalBom: bomBreakdown,
+    _internalBom: aggregatedBom,
+    _internalItemAnalyses: itemAnalyses,
   };
 }
 
@@ -508,10 +655,11 @@ export function listOrders(db: DatabaseSync) {
     .prepare(
       `SELECT o.*, c.name AS customer_name, c.code AS customer_code, c.state AS customer_state,
               p.name AS product_name, p.sku AS product_sku, p.unit AS product_unit,
-              p.selling_price_paise, p.gst_rate_bps, p.hsn_code
+              u.full_name AS salesman_name
        FROM orders o
        JOIN customers c ON c.id = o.customer_id
        JOIN inventory_items p ON p.id = o.product_id
+       LEFT JOIN users u ON u.id = o.salesman_user_id
        ORDER BY o.order_date DESC, o.order_number DESC`
     )
     .all() as Array<{
@@ -521,16 +669,24 @@ export function listOrders(db: DatabaseSync) {
     customer_name: string;
     customer_code: string;
     customer_state: string;
+    salesman_user_id: string | null;
+    salesman_name: string | null;
     product_id: string;
     product_name: string;
     product_sku: string;
     product_unit: string;
     requested_qty_scaled: number;
     dispatched_qty_scaled: number;
+    subtotal_paise: number;
     order_date: string;
     status: string;
     notes: string;
+    created_at: string;
   }>;
+
+  const itemStmt = db.prepare(
+    `SELECT * FROM order_items WHERE order_id = ? ORDER BY rowid ASC`
+  );
 
   const auditStmt = db.prepare(
     `SELECT id, timestamp, actor_name, action, from_status, to_status, note
@@ -540,6 +696,39 @@ export function listOrders(db: DatabaseSync) {
   );
 
   return rows.map((row) => {
+    const items = (
+      itemStmt.all(row.id) as Array<{
+        id: string;
+        product_id: string;
+        product_name: string;
+        sku: string;
+        pack_size: string;
+        unit: string;
+        image_url: string;
+        unit_price_paise: number;
+        gst_rate_bps: number;
+        requested_qty_scaled: number;
+        dispatched_qty_scaled: number;
+      }>
+    ).map((it) => {
+      const qty = fromScaledQty(it.requested_qty_scaled);
+      const unitPrice = fromPaise(it.unit_price_paise);
+      return {
+        id: it.id,
+        productId: it.product_id,
+        productName: it.product_name,
+        sku: it.sku,
+        packSize: it.pack_size,
+        unit: it.unit,
+        imageUrl: it.image_url || undefined,
+        unitPrice,
+        gstRate: fromGstBps(it.gst_rate_bps),
+        requestedQuantity: qty,
+        dispatchedQuantity: fromScaledQty(it.dispatched_qty_scaled),
+        lineTotal: Math.round(qty * unitPrice * 100) / 100,
+      };
+    });
+
     const audits = auditStmt.all(row.id) as Array<{
       id: string;
       timestamp: string;
@@ -550,6 +739,11 @@ export function listOrders(db: DatabaseSync) {
       note: string;
     }>;
 
+    const displayProductName =
+      items.length > 1
+        ? `${items[0].productName} (+${items.length - 1} more)`
+        : row.product_name;
+
     return {
       id: row.id,
       orderNumber: row.order_number,
@@ -557,13 +751,18 @@ export function listOrders(db: DatabaseSync) {
       customerName: row.customer_name,
       customerCode: row.customer_code,
       customerState: row.customer_state,
+      salesmanUserId: row.salesman_user_id || undefined,
+      salesmanName: row.salesman_name || undefined,
       productId: row.product_id,
-      productName: row.product_name,
+      productName: displayProductName,
       productSku: row.product_sku,
       unit: row.product_unit,
       requestedQuantity: fromScaledQty(row.requested_qty_scaled),
       dispatchedQuantity: fromScaledQty(row.dispatched_qty_scaled),
+      subtotal: fromPaise(row.subtotal_paise),
+      items,
       orderDate: row.order_date,
+      createdAt: row.created_at,
       status: row.status,
       notes: row.notes || undefined,
       auditTrail: audits.map((a) => ({
@@ -624,89 +823,100 @@ export function submitOrderDecision(
         );
       }
 
-      const existingPr = db
-        .prepare(
-          `SELECT request_number FROM production_requests
-           WHERE order_id = ? AND status != 'CANCELLED'`
-        )
-        .get(orderId) as { request_number: string } | undefined;
-
-      if (existingPr) {
-        throw new HttpError(
-          409,
-          `Production request ${existingPr.request_number} already exists for order ${order.order_number}. Duplicate requests are blocked.`
-        );
-      }
-
-      const requestNumber = nextSequenceNumber(
-        db,
-        'production_requests',
-        'request_number',
-        'PR-2026-'
-      );
-      createdRequestId = uid('pr');
-
-      const hasShortages = analysis.materialsRequiringPurchase.length > 0;
-      const prStatus = hasShortages ? 'AWAITING_MATERIALS' : 'PENDING_SUPERVISOR_REVIEW';
-      const supStatus = hasShortages
-        ? 'Awaiting Materials'
-        : 'Pending Supervisor Review';
-
-      db.prepare(
-        `INSERT INTO production_requests (
-          id, request_number, order_id, product_id, requested_qty_scaled,
-          status, assigned_supervisor_id, supervisor_status, created_at, created_by, notes, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`
-      ).run(
-        createdRequestId,
-        requestNumber,
-        order.id,
-        analysis.productId,
-        toScaledQty(analysis.shortageQuantity),
-        prStatus,
-        supStatus,
-        nowIso,
-        actor.fullName,
-        note?.trim() || '',
-        nowIso
+      const shortageItems = (analysis._internalItemAnalyses ?? []).filter(
+        (ia) => ia.shortageQuantity > 0
       );
 
-      // Create material shortage queries for any insufficient raw/packaging materials
-      if (hasShortages && '_internalBom' in analysis && analysis._internalBom) {
-        const insertQuery = db.prepare(
-          `INSERT INTO material_shortage_queries (
-            id, query_number, production_request_id, order_id, material_id,
-            required_qty_scaled, available_qty_scaled, shortage_qty_scaled,
-            status, notes, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)`
+      const createdRequestNumbers: string[] = [];
+      const createdRequestIds: string[] = [];
+
+      for (const item of shortageItems) {
+        const existingPr = db
+          .prepare(
+            `SELECT request_number FROM production_requests
+             WHERE order_id = ? AND product_id = ? AND status != 'CANCELLED'`
+          )
+          .get(orderId, item.productId) as { request_number: string } | undefined;
+
+        if (existingPr) {
+          throw new HttpError(
+            409,
+            `Production request ${existingPr.request_number} already exists for order ${order.order_number} (${item.productName}). Duplicate requests are blocked.`
+          );
+        }
+
+        const requestNumber = nextSequenceNumber(
+          db,
+          'production_requests',
+          'request_number',
+          'PR-2026-'
         );
-        for (const line of analysis._internalBom) {
-          if (!line.isSufficient) {
-            const qNum = nextSequenceNumber(
-              db,
-              'material_shortage_queries',
-              'query_number',
-              'MSQ-2026-'
-            );
-            insertQuery.run(
-              uid('msq'),
-              qNum,
-              createdRequestId,
-              order.id,
-              line.rawMaterialId,
-              line._requiredScaled,
-              line._availableScaled,
-              line._shortfallScaled,
-              `Shortage detected for ${order.order_number} / ${requestNumber}`,
-              nowIso,
-              nowIso
-            );
+        const prId = uid('pr');
+        if (!createdRequestId) createdRequestId = prId;
+        createdRequestIds.push(prId);
+        createdRequestNumbers.push(requestNumber);
+
+        const hasShortages = item.materialsRequiringPurchase.length > 0;
+        const prStatus = hasShortages ? 'AWAITING_MATERIALS' : 'PENDING_SUPERVISOR_REVIEW';
+        const supStatus = hasShortages
+          ? 'Awaiting Materials'
+          : 'Pending Supervisor Review';
+
+        db.prepare(
+          `INSERT INTO production_requests (
+            id, request_number, order_id, product_id, requested_qty_scaled,
+            status, assigned_supervisor_id, supervisor_status, created_at, created_by, notes, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`
+        ).run(
+          prId,
+          requestNumber,
+          order.id,
+          item.productId,
+          toScaledQty(item.shortageQuantity),
+          prStatus,
+          supStatus,
+          nowIso,
+          actor.fullName,
+          note?.trim() || '',
+          nowIso
+        );
+
+        if (hasShortages && item._internalBom) {
+          const insertQuery = db.prepare(
+            `INSERT INTO material_shortage_queries (
+              id, query_number, production_request_id, order_id, material_id,
+              required_qty_scaled, available_qty_scaled, shortage_qty_scaled,
+              status, notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)`
+          );
+          for (const line of item._internalBom) {
+            if (!line.isSufficient) {
+              const qNum = nextSequenceNumber(
+                db,
+                'material_shortage_queries',
+                'query_number',
+                'MSQ-2026-'
+              );
+              insertQuery.run(
+                uid('msq'),
+                qNum,
+                prId,
+                order.id,
+                line.rawMaterialId,
+                line._requiredScaled,
+                line._availableScaled,
+                line._shortfallScaled,
+                `Shortage detected for ${order.order_number} / ${requestNumber}`,
+                nowIso,
+                nowIso
+              );
+            }
           }
         }
       }
 
       nextStatus = 'PRODUCTION_REQUIRED';
-      actionLabel = `Sent shortage (${analysis.shortageQuantity} ${analysis.unit}) for production (${requestNumber})`;
+      actionLabel = `Sent shortage (${analysis.shortageQuantity} ${analysis.unit}) for production (${createdRequestNumbers.join(', ')})`;
     } else if (decision === 'WAIT_KEEP_PENDING') {
       nextStatus = analysis.shortageQuantity > 0 ? 'AWAITING_STOCK' : 'UNDER_REVIEW';
       actionLabel =
@@ -1827,18 +2037,61 @@ export function recordDispatch(
     const dispatchNumber = nextSequenceNumber(db, 'dispatches', 'dispatch_number', 'DISP-2026-');
     const dispatchId = uid('disp');
 
-    applyStockMovement(db, {
-      itemId: order.product_id,
-      movementType: 'DISPATCH',
-      direction: 'OUT',
-      qtyScaled,
-      referenceType: 'DISPATCH',
-      referenceId: dispatchId,
-      referenceNumber: dispatchNumber,
-      reason: `Dispatched for order ${order.order_number}`,
-      actor,
-      nowIso,
-    });
+    const orderItems = db
+      .prepare(
+        `SELECT id, product_id, requested_qty_scaled, dispatched_qty_scaled
+         FROM order_items WHERE order_id = ? ORDER BY rowid ASC`
+      )
+      .all(order.id) as Array<{
+      id: string;
+      product_id: string;
+      requested_qty_scaled: number;
+      dispatched_qty_scaled: number;
+    }>;
+
+    if (orderItems.length > 1) {
+      let remainingToAllocate = qtyScaled;
+      for (const item of orderItems) {
+        if (remainingToAllocate <= 0) break;
+        const itemRemaining = item.requested_qty_scaled - item.dispatched_qty_scaled;
+        if (itemRemaining <= 0) continue;
+        const itemDispatch = Math.min(remainingToAllocate, itemRemaining);
+        applyStockMovement(db, {
+          itemId: item.product_id,
+          movementType: 'DISPATCH',
+          direction: 'OUT',
+          qtyScaled: itemDispatch,
+          referenceType: 'DISPATCH',
+          referenceId: dispatchId,
+          referenceNumber: dispatchNumber,
+          reason: `Dispatched for order ${order.order_number}`,
+          actor,
+          nowIso,
+        });
+        db.prepare(
+          `UPDATE order_items SET dispatched_qty_scaled = dispatched_qty_scaled + ? WHERE id = ?`
+        ).run(itemDispatch, item.id);
+        remainingToAllocate -= itemDispatch;
+      }
+    } else {
+      applyStockMovement(db, {
+        itemId: order.product_id,
+        movementType: 'DISPATCH',
+        direction: 'OUT',
+        qtyScaled,
+        referenceType: 'DISPATCH',
+        referenceId: dispatchId,
+        referenceNumber: dispatchNumber,
+        reason: `Dispatched for order ${order.order_number}`,
+        actor,
+        nowIso,
+      });
+      if (orderItems.length === 1) {
+        db.prepare(
+          `UPDATE order_items SET dispatched_qty_scaled = dispatched_qty_scaled + ? WHERE id = ?`
+        ).run(qtyScaled, orderItems[0].id);
+      }
+    }
 
     db.prepare(
       `INSERT INTO dispatches (id, dispatch_number, order_id, dispatched_qty_scaled, invoiced_qty_scaled, dispatched_at, dispatched_by, idempotency_key, notes)
@@ -2142,12 +2395,74 @@ export function createInvoiceFromDispatchByAccountant(
         ? 'INTRA_STATE'
         : 'INTER_STATE';
 
-    const taxablePaise = calcTaxablePaise(
-      dispatch.dispatched_qty_scaled,
-      dispatch.selling_price_paise
-    );
-    const gst = calcGstPaise(taxablePaise, dispatch.gst_rate_bps, supplyType);
-    const totalPaise = taxablePaise + gst.totalGstPaise;
+    const orderItems = db
+      .prepare(
+        `SELECT oi.product_id, oi.product_name, oi.sku, oi.unit, oi.unit_price_paise, oi.gst_rate_bps,
+                oi.dispatched_qty_scaled, p.hsn_code
+         FROM order_items oi
+         JOIN inventory_items p ON p.id = oi.product_id
+         WHERE oi.order_id = ? AND oi.dispatched_qty_scaled > 0
+         ORDER BY oi.rowid ASC`
+      )
+      .all(dispatch.order_id) as Array<{
+      product_id: string;
+      product_name: string;
+      sku: string;
+      unit: string;
+      unit_price_paise: number;
+      gst_rate_bps: number;
+      dispatched_qty_scaled: number;
+      hsn_code: string;
+    }>;
+
+    const lineSpecs =
+      orderItems.length > 1
+        ? orderItems.map((it) => {
+            const taxable = calcTaxablePaise(it.dispatched_qty_scaled, it.unit_price_paise);
+            const gstLine = calcGstPaise(taxable, it.gst_rate_bps, supplyType);
+            return {
+              productId: it.product_id,
+              productName: it.product_name,
+              sku: it.sku,
+              hsnCode: it.hsn_code,
+              unit: it.unit,
+              qtyScaled: it.dispatched_qty_scaled,
+              unitPricePaise: it.unit_price_paise,
+              gstRateBps: it.gst_rate_bps,
+              taxablePaise: taxable,
+              ...gstLine,
+              totalPaise: taxable + gstLine.totalGstPaise,
+            };
+          })
+        : [
+            (() => {
+              const taxable = calcTaxablePaise(
+                dispatch.dispatched_qty_scaled,
+                dispatch.selling_price_paise
+              );
+              const gstLine = calcGstPaise(taxable, dispatch.gst_rate_bps, supplyType);
+              return {
+                productId: dispatch.product_id,
+                productName: dispatch.product_name,
+                sku: dispatch.sku,
+                hsnCode: dispatch.hsn_code,
+                unit: dispatch.unit,
+                qtyScaled: dispatch.dispatched_qty_scaled,
+                unitPricePaise: dispatch.selling_price_paise,
+                gstRateBps: dispatch.gst_rate_bps,
+                taxablePaise: taxable,
+                ...gstLine,
+                totalPaise: taxable + gstLine.totalGstPaise,
+              };
+            })(),
+          ];
+
+    const taxablePaise = lineSpecs.reduce((s, l) => s + l.taxablePaise, 0);
+    const cgstTotalPaise = lineSpecs.reduce((s, l) => s + l.cgstPaise, 0);
+    const sgstTotalPaise = lineSpecs.reduce((s, l) => s + l.sgstPaise, 0);
+    const igstTotalPaise = lineSpecs.reduce((s, l) => s + l.igstPaise, 0);
+    const totalGstPaise = cgstTotalPaise + sgstTotalPaise + igstTotalPaise;
+    const totalPaise = taxablePaise + totalGstPaise;
 
     const nowIso = new Date().toISOString();
     const invoiceNumber = nextSequenceNumber(db, 'invoices', 'invoice_number', 'INV-2026-');
@@ -2170,38 +2485,41 @@ export function createInvoiceFromDispatchByAccountant(
       supplyType,
       dispatch.customer_state,
       taxablePaise,
-      gst.cgstPaise,
-      gst.sgstPaise,
-      gst.igstPaise,
-      gst.totalGstPaise,
+      cgstTotalPaise,
+      sgstTotalPaise,
+      igstTotalPaise,
+      totalGstPaise,
       totalPaise,
       actor.fullName,
       nowIso
     );
 
-    db.prepare(
+    const insertInvLine = db.prepare(
       `INSERT INTO invoice_lines (
         id, invoice_id, product_id, product_name, sku, hsn_code, unit,
         quantity_scaled, unit_price_paise, gst_rate_bps,
         taxable_amount_paise, cgst_paise, sgst_paise, igst_paise, total_paise
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      uid('invl'),
-      invoiceId,
-      dispatch.product_id,
-      dispatch.product_name,
-      dispatch.sku,
-      dispatch.hsn_code,
-      dispatch.unit,
-      dispatch.dispatched_qty_scaled,
-      dispatch.selling_price_paise,
-      dispatch.gst_rate_bps,
-      taxablePaise,
-      gst.cgstPaise,
-      gst.sgstPaise,
-      gst.igstPaise,
-      totalPaise
     );
+    for (const line of lineSpecs) {
+      insertInvLine.run(
+        uid('invl'),
+        invoiceId,
+        line.productId,
+        line.productName,
+        line.sku,
+        line.hsnCode,
+        line.unit,
+        line.qtyScaled,
+        line.unitPricePaise,
+        line.gstRateBps,
+        line.taxablePaise,
+        line.cgstPaise,
+        line.sgstPaise,
+        line.igstPaise,
+        line.totalPaise
+      );
+    }
 
     db.prepare(`UPDATE dispatches SET invoiced_qty_scaled = ? WHERE id = ?`).run(
       dispatch.dispatched_qty_scaled,
@@ -2938,4 +3256,453 @@ export function resetUserAccessByOwner(
 
   recordAuditLog(db, actor, 'USER', userId, 'RESET_ACCESS', `Sessions cleared for ${target.email}`);
   return { id: userId, temporaryPassword: tempPass };
+}
+
+// ---------------------------------------------------------------------------
+// Salesman Dashboard & Order Creation (Strictly Scoped; Zero Stock Visibility)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns active finished-goods catalogue for Salesmen WITHOUT any inventory balances,
+ * reorder levels, movement counts, or BOM/raw-material information.
+ */
+export function listSalesmanCatalogue(db: DatabaseSync, actor: AuthUser) {
+  requireRole(actor, ['SALESMAN']);
+  const rows = db
+    .prepare(
+      `SELECT id, sku, name, pack_size, unit, selling_price_paise, gst_rate_bps, hsn_code, image_url
+       FROM inventory_items
+       WHERE category = 'FINISHED_GOOD' AND is_active = 1
+       ORDER BY name ASC`
+    )
+    .all() as Array<{
+    id: string;
+    sku: string;
+    name: string;
+    pack_size: string;
+    unit: string;
+    selling_price_paise: number;
+    gst_rate_bps: number;
+    hsn_code: string;
+    image_url: string;
+  }>;
+
+  return rows.map((r) => ({
+    id: r.id,
+    sku: r.sku,
+    name: r.name,
+    packSize: r.pack_size,
+    unit: r.unit,
+    sellingPrice: fromPaise(r.selling_price_paise),
+    gstRate: fromGstBps(r.gst_rate_bps),
+    hsnCode: r.hsn_code,
+    imageUrl: r.image_url || undefined,
+  }));
+}
+
+/**
+ * Read-only active customer list for Salesman customer selection.
+ */
+export function listSalesmanCustomers(db: DatabaseSync, actor: AuthUser) {
+  requireRole(actor, ['SALESMAN']);
+  const rows = db
+    .prepare(
+      `SELECT id, code, name, contact_person, phone, email, billing_address, delivery_address, state
+       FROM customers
+       WHERE is_active = 1
+       ORDER BY name ASC`
+    )
+    .all() as Array<{
+    id: string;
+    code: string;
+    name: string;
+    contact_person: string;
+    phone: string;
+    email: string;
+    billing_address: string;
+    delivery_address: string;
+    state: string;
+  }>;
+
+  return rows.map((c) => ({
+    id: c.id,
+    code: c.code,
+    name: c.name,
+    contactPerson: c.contact_person,
+    phone: c.phone,
+    email: c.email,
+    billingAddress: c.billing_address,
+    deliveryAddress: c.delivery_address,
+    state: c.state,
+  }));
+}
+
+function sanitizeAuditActionForSalesman(toStatus: string): string {
+  switch (toStatus) {
+    case 'SUBMITTED':
+      return 'Order submitted for review';
+    case 'UNDER_REVIEW':
+      return 'Order is under Admin review';
+    case 'PRODUCTION_REQUIRED':
+      return 'Queued for production fulfillment';
+    case 'AWAITING_STOCK':
+      return 'Pending stock availability';
+    case 'APPROVED':
+      return 'Order approved and ready for dispatch';
+    case 'PARTIALLY_DISPATCHED':
+      return 'Order partially dispatched';
+    case 'DISPATCHED':
+      return 'Order dispatched';
+    case 'REJECTED':
+      return 'Order rejected';
+    default:
+      return `Status updated to ${toStatus}`;
+  }
+}
+
+function mapSalesmanOrderRow(
+  db: DatabaseSync,
+  row: {
+    id: string;
+    order_number: string;
+    customer_id: string;
+    customer_name: string;
+    customer_code: string;
+    contact_person: string;
+    phone: string;
+    delivery_address: string;
+    customer_state: string;
+    requested_qty_scaled: number;
+    dispatched_qty_scaled: number;
+    subtotal_paise: number;
+    order_date: string;
+    status: string;
+    notes: string;
+    created_at: string;
+  }
+) {
+  const items = (
+    db
+      .prepare(`SELECT * FROM order_items WHERE order_id = ? ORDER BY rowid ASC`)
+      .all(row.id) as Array<{
+      id: string;
+      product_id: string;
+      product_name: string;
+      sku: string;
+      pack_size: string;
+      unit: string;
+      image_url: string;
+      unit_price_paise: number;
+      gst_rate_bps: number;
+      requested_qty_scaled: number;
+      dispatched_qty_scaled: number;
+    }>
+  ).map((it) => {
+    const qty = fromScaledQty(it.requested_qty_scaled);
+    const unitPrice = fromPaise(it.unit_price_paise);
+    return {
+      id: it.id,
+      productId: it.product_id,
+      productName: it.product_name,
+      sku: it.sku,
+      packSize: it.pack_size,
+      unit: it.unit,
+      imageUrl: it.image_url || undefined,
+      unitPrice,
+      gstRate: fromGstBps(it.gst_rate_bps),
+      requestedQuantity: qty,
+      dispatchedQuantity: fromScaledQty(it.dispatched_qty_scaled),
+      lineTotal: Math.round(qty * unitPrice * 100) / 100,
+    };
+  });
+
+  // Derive high-level production stage only when PRODUCTION_REQUIRED, without exposing raw stock/costs
+  let productionStage: string | undefined;
+  if (row.status === 'PRODUCTION_REQUIRED') {
+    const prStatuses = db
+      .prepare(
+        `SELECT status FROM production_requests WHERE order_id = ? AND status != 'CANCELLED'`
+      )
+      .all(row.id) as Array<{ status: string }>;
+    if (prStatuses.some((p) => p.status === 'IN_PROGRESS')) {
+      productionStage = 'IN_PROGRESS';
+    } else if (prStatuses.some((p) => p.status === 'AWAITING_MATERIALS')) {
+      productionStage = 'AWAITING_MATERIALS';
+    } else if (prStatuses.length > 0 && prStatuses.every((p) => p.status === 'COMPLETED')) {
+      productionStage = 'READY_FOR_DISPATCH';
+    }
+  }
+
+  const audits = (
+    db
+      .prepare(
+        `SELECT id, timestamp, to_status, from_status
+         FROM order_audit_trail
+         WHERE order_id = ?
+         ORDER BY timestamp DESC`
+      )
+      .all(row.id) as Array<{
+      id: string;
+      timestamp: string;
+      to_status: string;
+      from_status: string | null;
+    }>
+  ).map((a) => ({
+    id: a.id,
+    timestamp: a.timestamp,
+    action: sanitizeAuditActionForSalesman(a.to_status),
+    fromStatus: a.from_status || undefined,
+    toStatus: a.to_status,
+  }));
+
+  const computedSubtotal =
+    row.subtotal_paise > 0
+      ? fromPaise(row.subtotal_paise)
+      : Math.round(items.reduce((s, it) => s + it.lineTotal, 0) * 100) / 100;
+
+  return {
+    id: row.id,
+    orderNumber: row.order_number,
+    customerId: row.customer_id,
+    customerName: row.customer_name,
+    customerCode: row.customer_code,
+    customerContact: row.contact_person,
+    customerPhone: row.phone,
+    deliveryAddress: row.delivery_address,
+    customerState: row.customer_state,
+    requestedQuantity: fromScaledQty(row.requested_qty_scaled),
+    dispatchedQuantity: fromScaledQty(row.dispatched_qty_scaled),
+    subtotal: computedSubtotal,
+    orderDate: row.order_date,
+    createdAt: row.created_at,
+    status: row.status,
+    productionStage,
+    customerNote: row.notes || undefined,
+    items,
+    progressUpdates: audits,
+  };
+}
+
+export function listSalesmanOrders(db: DatabaseSync, actor: AuthUser) {
+  requireRole(actor, ['SALESMAN']);
+  const rows = db
+    .prepare(
+      `SELECT o.*, c.name AS customer_name, c.code AS customer_code, c.contact_person,
+              c.phone, c.delivery_address, c.state AS customer_state
+       FROM orders o
+       JOIN customers c ON c.id = o.customer_id
+       WHERE o.salesman_user_id = ?
+       ORDER BY o.created_at DESC, o.order_number DESC`
+    )
+    .all(actor.id) as Array<Parameters<typeof mapSalesmanOrderRow>[1]>;
+
+  return rows.map((row) => mapSalesmanOrderRow(db, row));
+}
+
+export function getSalesmanOrderDetail(db: DatabaseSync, actor: AuthUser, orderId: string) {
+  requireRole(actor, ['SALESMAN']);
+  const row = db
+    .prepare(
+      `SELECT o.*, c.name AS customer_name, c.code AS customer_code, c.contact_person,
+              c.phone, c.delivery_address, c.state AS customer_state
+       FROM orders o
+       JOIN customers c ON c.id = o.customer_id
+       WHERE o.id = ?`
+    )
+    .get(orderId) as
+    | (Parameters<typeof mapSalesmanOrderRow>[1] & { salesman_user_id: string | null })
+    | undefined;
+
+  if (!row) {
+    throw new HttpError(404, `Order ${orderId} not found.`);
+  }
+  if (row.salesman_user_id !== actor.id) {
+    throw new HttpError(403, 'Access denied: you can only view orders you submitted.');
+  }
+
+  return mapSalesmanOrderRow(db, row);
+}
+
+export function getSalesmanDashboard(db: DatabaseSync, actor: AuthUser) {
+  requireRole(actor, ['SALESMAN']);
+  const orders = listSalesmanOrders(db, actor);
+  const totalOrdersCount = orders.length;
+  const pendingOrdersCount = orders.filter(
+    (o) => o.status !== 'DISPATCHED' && o.status !== 'REJECTED'
+  ).length;
+  return {
+    totalOrdersCount,
+    pendingOrdersCount,
+    recentOrders: orders.slice(0, 6),
+  };
+}
+
+/**
+ * Creates a customer order (single or multi-product) submitted by a Salesman.
+ * Never checks or blocks on finished-goods or raw-material stock.
+ */
+export function createSalesmanOrder(
+  db: DatabaseSync,
+  actor: AuthUser,
+  input: {
+    customerId: string;
+    items: Array<{ productId: string; quantity: number }>;
+    customerNote?: string;
+  }
+) {
+  requireRole(actor, ['SALESMAN']);
+
+  if (!input.customerId?.trim()) {
+    throw new HttpError(400, 'Please select a customer before submitting the order.');
+  }
+  if (!Array.isArray(input.items) || input.items.length === 0) {
+    throw new HttpError(400, 'Please add at least one product to the order.');
+  }
+
+  // Merge duplicate product lines safely
+  const mergedItems = new Map<string, number>();
+  for (const line of input.items) {
+    if (!line.productId || !Number.isFinite(line.quantity) || line.quantity <= 0) {
+      throw new HttpError(400, 'Every order item must have a valid product and quantity greater than zero.');
+    }
+    mergedItems.set(line.productId, (mergedItems.get(line.productId) ?? 0) + line.quantity);
+  }
+
+  return runInTransaction(db, () => {
+    const customer = db
+      .prepare(`SELECT id, name, is_active FROM customers WHERE id = ?`)
+      .get(input.customerId) as { id: string; name: string; is_active: number } | undefined;
+    if (!customer || !customer.is_active) {
+      throw new HttpError(400, 'Selected customer is invalid or inactive.');
+    }
+
+    const resolvedLines: Array<{
+      productId: string;
+      name: string;
+      sku: string;
+      packSize: string;
+      unit: string;
+      imageUrl: string;
+      unitPricePaise: number;
+      gstRateBps: number;
+      qtyScaled: number;
+      lineSubtotalPaise: number;
+    }> = [];
+
+    const prodStmt = db.prepare(
+      `SELECT id, sku, name, pack_size, unit, image_url, selling_price_paise, gst_rate_bps, category, is_active
+       FROM inventory_items WHERE id = ?`
+    );
+
+    for (const [productId, quantity] of mergedItems.entries()) {
+      const prod = prodStmt.get(productId) as
+        | {
+            id: string;
+            sku: string;
+            name: string;
+            pack_size: string;
+            unit: string;
+            image_url: string;
+            selling_price_paise: number;
+            gst_rate_bps: number;
+            category: string;
+            is_active: number;
+          }
+        | undefined;
+
+      if (!prod || prod.category !== 'FINISHED_GOOD' || !prod.is_active) {
+        throw new HttpError(400, `Product ${productId} is unavailable in the catalogue.`);
+      }
+
+      const qtyScaled = toScaledQty(quantity);
+      const lineSubtotalPaise = calcTaxablePaise(qtyScaled, prod.selling_price_paise);
+      resolvedLines.push({
+        productId: prod.id,
+        name: prod.name,
+        sku: prod.sku,
+        packSize: prod.pack_size,
+        unit: prod.unit,
+        imageUrl: prod.image_url || '',
+        unitPricePaise: prod.selling_price_paise,
+        gstRateBps: prod.gst_rate_bps,
+        qtyScaled,
+        lineSubtotalPaise,
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    const orderNumber = nextSequenceNumber(db, 'orders', 'order_number', 'ORD-2026-');
+    const orderId = `ord-${crypto.randomUUID().slice(0, 8)}`;
+    const totalRequestedScaled = resolvedLines.reduce((s, l) => s + l.qtyScaled, 0);
+    const subtotalPaise = resolvedLines.reduce((s, l) => s + l.lineSubtotalPaise, 0);
+    const primaryProductId = resolvedLines[0].productId;
+    const noteTrimmed = input.customerNote?.trim() || '';
+
+    db.prepare(
+      `INSERT INTO orders (
+        id, order_number, customer_id, salesman_user_id, product_id,
+        requested_qty_scaled, dispatched_qty_scaled, subtotal_paise,
+        order_date, status, notes, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 'SUBMITTED', ?, ?, ?)`
+    ).run(
+      orderId,
+      orderNumber,
+      customer.id,
+      actor.id,
+      primaryProductId,
+      totalRequestedScaled,
+      subtotalPaise,
+      nowIso.slice(0, 10),
+      noteTrimmed,
+      nowIso,
+      nowIso
+    );
+
+    const insertLine = db.prepare(
+      `INSERT INTO order_items (
+        id, order_id, product_id, product_name, sku, pack_size, unit, image_url,
+        unit_price_paise, gst_rate_bps, requested_qty_scaled, dispatched_qty_scaled
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+    );
+    for (const line of resolvedLines) {
+      insertLine.run(
+        uid('oi'),
+        orderId,
+        line.productId,
+        line.name,
+        line.sku,
+        line.packSize,
+        line.unit,
+        line.imageUrl,
+        line.unitPricePaise,
+        line.gstRateBps,
+        line.qtyScaled
+      );
+    }
+
+    db.prepare(
+      `INSERT INTO order_audit_trail (
+        id, order_id, timestamp, actor_user_id, actor_name, action, from_status, to_status, note
+      ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'SUBMITTED', ?)`
+    ).run(
+      uid('aud'),
+      orderId,
+      nowIso,
+      actor.id,
+      actor.fullName,
+      `Order submitted by ${actor.fullName} for ${customer.name} (${resolvedLines.length} item${resolvedLines.length > 1 ? 's' : ''})`,
+      noteTrimmed
+    );
+
+    recordAuditLog(
+      db,
+      actor,
+      'ORDER',
+      orderId,
+      'SALESMAN_SUBMIT_ORDER',
+      `${orderNumber} submitted for ${customer.name}`
+    );
+
+    return getSalesmanOrderDetail(db, actor, orderId);
+  });
 }

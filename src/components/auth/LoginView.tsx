@@ -6,6 +6,7 @@ import type { AuthUser } from '../../types/orderAudit';
 const DEMO_ACCOUNTS = [
   { label: 'Admin', email: 'admin@nitt.local', role: 'ADMIN' },
   { label: 'Owner / Super Admin', email: 'owner@nitt.local', role: 'OWNER_SUPER_ADMIN' },
+  { label: 'Salesman', email: 'salesman@nitt.local', role: 'SALESMAN' },
   { label: 'Production Supervisor', email: 'supervisor@nitt.local', role: 'PRODUCTION_SUPERVISOR' },
   { label: 'Accountant', email: 'accountant@nitt.local', role: 'ACCOUNTANT' },
 ];

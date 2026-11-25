@@ -16,6 +16,10 @@ import type {
   ProductionRun,
   PurchaseOrder,
   PurchaseReceipt,
+  SalesmanCustomer,
+  SalesmanDashboardData,
+  SalesmanOrder,
+  SalesmanProduct,
   StockMovement,
   Supplier,
   UserRole,
@@ -447,6 +451,40 @@ export const orderAuditService = {
     return fetchJson(`/api/management/users/${encodeURIComponent(userId)}/reset-access`, {
       method: 'POST',
       body: JSON.stringify({ temporaryPassword }),
+    });
+  },
+
+  // --- Salesman Portal ---
+  async loadSalesmanDashboard(): Promise<SalesmanDashboardData> {
+    return fetchJson<SalesmanDashboardData>('/api/salesman/dashboard');
+  },
+
+  async listSalesmanProducts(): Promise<SalesmanProduct[]> {
+    return fetchJson<SalesmanProduct[]>('/api/salesman/products');
+  },
+
+  async listSalesmanCustomers(): Promise<SalesmanCustomer[]> {
+    return fetchJson<SalesmanCustomer[]>('/api/salesman/customers');
+  },
+
+  async listSalesmanOrders(): Promise<SalesmanOrder[]> {
+    return fetchJson<SalesmanOrder[]>('/api/salesman/orders');
+  },
+
+  async getSalesmanOrderDetail(orderId: string): Promise<SalesmanOrder> {
+    return fetchJson<SalesmanOrder>(
+      `/api/salesman/orders/${encodeURIComponent(orderId)}`
+    );
+  },
+
+  async createSalesmanOrder(payload: {
+    customerId: string;
+    items: Array<{ productId: string; quantity: number }>;
+    customerNote?: string;
+  }): Promise<SalesmanOrder> {
+    return fetchJson<SalesmanOrder>('/api/salesman/orders', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     });
   },
 };

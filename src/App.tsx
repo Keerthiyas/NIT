@@ -9,6 +9,7 @@ import { OrdersPageView } from './components/orders/OrdersPageView';
 import { ProductionStockView } from './components/production/ProductionStockView';
 import { AccountantPortalView } from './components/roles/AccountantPortalView';
 import { SupervisorPortalView } from './components/roles/SupervisorPortalView';
+import { SalesmanPortalView } from './components/salesman/SalesmanPortalView';
 import {
   orderAuditService,
   type OrderAuditSnapshot,
@@ -175,6 +176,15 @@ export function App() {
   if (currentUser.role === 'ACCOUNTANT') {
     return (
       <AccountantPortalView
+        user={currentUser}
+        onLogout={() => void handleLogout()}
+      />
+    );
+  }
+
+  if (currentUser.role === 'SALESMAN') {
+    return (
+      <SalesmanPortalView
         user={currentUser}
         onLogout={() => void handleLogout()}
       />

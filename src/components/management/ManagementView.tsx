@@ -790,6 +790,7 @@ export function ManagementView({
                                 <option value="ADMIN">ADMIN</option>
                                 <option value="PRODUCTION_SUPERVISOR">PRODUCTION_SUPERVISOR</option>
                                 <option value="ACCOUNTANT">ACCOUNTANT</option>
+                                <option value="SALESMAN">SALESMAN</option>
                               </select>
                             </td>
                             <td className="px-4 py-2.5">
@@ -827,6 +828,134 @@ export function ManagementView({
             </>
           )}
         </>
+      )}
+
+      {/* Product Details Modal (Larger Image + Full Specs + BOM) */}
+      {detailProduct && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4 overflow-y-auto">
+          <div className="w-full max-w-xl rounded-lg border border-slate-200 bg-white shadow-xl my-auto">
+            <header className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">
+                  {detailProduct.name}
+                </h3>
+                <p className="text-xs font-mono text-slate-500">{detailProduct.sku}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDetailProduct(null)}
+                className="rounded p-1 text-slate-500 hover:bg-slate-100"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </header>
+            <div className="p-5 space-y-4 text-xs">
+              <div className="flex flex-col sm:flex-row gap-4 items-start">
+                <ProductImage
+                  src={detailProduct.imageUrl}
+                  alt={detailProduct.name}
+                  size="lg"
+                />
+                <dl className="flex-1 grid grid-cols-2 gap-x-4 gap-y-2.5">
+                  <div>
+                    <dt className="text-slate-500">Pack Size</dt>
+                    <dd className="font-medium text-slate-900">
+                      {detailProduct.packSize || '—'} ({detailProduct.unit})
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-500">Status</dt>
+                    <dd className="mt-0.5">
+                      <ToneBadge tone={detailProduct.isActive ? 'success' : 'neutral'}>
+                        {detailProduct.isActive ? 'Active' : 'Inactive'}
+                      </ToneBadge>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-500">Selling Price</dt>
+                    <dd className="font-semibold text-slate-900 tabular-nums">
+                      ₹{detailProduct.sellingPrice.toFixed(2)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-500">GST Rate / HSN</dt>
+                    <dd className="font-medium text-slate-900 tabular-nums">
+                      {detailProduct.gstRate}% • {detailProduct.hsnCode}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-500">Current Stock</dt>
+                    <dd className="font-medium text-slate-900 tabular-nums">
+                      {detailProduct.availableStock} {detailProduct.unit}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-500">Reorder Level</dt>
+                    <dd className="font-medium text-slate-900 tabular-nums">
+                      {detailProduct.reorderLevel} {detailProduct.unit}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div className="border-t border-slate-200 pt-3">
+                <p className="font-semibold text-slate-800 mb-2">
+                  Bill of Materials (per 1 {detailProduct.unit})
+                </p>
+                {detailProduct.bomItems.length === 0 ? (
+                  <p className="text-slate-500">No BOM components linked.</p>
+                ) : (
+                  <div className="overflow-x-auto rounded border border-slate-200">
+                    <table className="w-full text-left">
+                      <thead className="border-b border-slate-200 bg-slate-50 text-slate-500">
+                        <tr>
+                          <th className="px-3 py-1.5">Material</th>
+                          <th className="px-3 py-1.5">SKU</th>
+                          <th className="px-3 py-1.5 text-right">Qty / Unit</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {detailProduct.bomItems.map((b) => (
+                          <tr key={b.id}>
+                            <td className="px-3 py-1.5 font-medium text-slate-800">
+                              {b.materialName}
+                            </td>
+                            <td className="px-3 py-1.5 font-mono text-slate-500">
+                              {b.materialSku}
+                            </td>
+                            <td className="px-3 py-1.5 text-right tabular-nums">
+                              {b.quantityPerUnit} {b.unit}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+            <footer className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
+              <button
+                type="button"
+                onClick={() => setDetailProduct(null)}
+                className="rounded border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = detailProduct;
+                  setDetailProduct(null);
+                  openProductModal(target);
+                }}
+                className="rounded bg-blue-950 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-900"
+              >
+                Edit Product &amp; Image
+              </button>
+            </footer>
+          </div>
+        </div>
       )}
 
       {/* Product + BOM Modal */}
@@ -1446,6 +1575,7 @@ export function ManagementView({
                   <option value="ADMIN">ADMIN</option>
                   <option value="PRODUCTION_SUPERVISOR">PRODUCTION_SUPERVISOR</option>
                   <option value="ACCOUNTANT">ACCOUNTANT</option>
+                  <option value="SALESMAN">SALESMAN</option>
                   <option value="OWNER_SUPER_ADMIN">OWNER_SUPER_ADMIN</option>
                 </select>
               </div>

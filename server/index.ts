@@ -18,9 +18,12 @@ import { seedDatabaseIfEmpty } from './seed.ts';
 import {
   createInvoiceFromDispatchByAccountant,
   createPurchaseOrder,
+  createSalesmanOrder,
   createUserByOwner,
   evaluateOrderAvailability,
   getAdminDashboardSummary,
+  getSalesmanDashboard,
+  getSalesmanOrderDetail,
   listCustomers,
   listDispatches,
   listInventoryItems,
@@ -32,6 +35,9 @@ import {
   listProductsWithBom,
   listPurchaseOrders,
   listPurchaseReceipts,
+  listSalesmanCatalogue,
+  listSalesmanCustomers,
+  listSalesmanOrders,
   listStockMovements,
   listSuppliers,
   listUsers,
@@ -168,7 +174,7 @@ export function createApiHandler(db: DatabaseSync) {
         requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
         const analysis = evaluateOrderAvailability(db, decodeURIComponent(availMatch[1]));
         if ('_internalBom' in analysis) {
-          const { _internalBom, ...publicAnalysis } = analysis;
+          const { _internalBom, _internalItemAnalyses, ...publicAnalysis } = analysis;
           return sendJson(res, 200, publicAnalysis);
         }
         return sendJson(res, 200, analysis);
@@ -490,6 +496,48 @@ export function createApiHandler(db: DatabaseSync) {
           body.temporaryPassword as string | undefined
         );
         return sendJson(res, 200, result);
+      }
+
+      // --- Salesman Dashboard & Ordering (Strictly SALESMAN Role; Zero Stock Exposure) ---
+      if (method === 'GET' && pathname === '/api/salesman/dashboard') {
+        const authed = requireRole(actor, ['SALESMAN']);
+        return sendJson(res, 200, getSalesmanDashboard(db, authed));
+      }
+
+      if (method === 'GET' && pathname === '/api/salesman/products') {
+        const authed = requireRole(actor, ['SALESMAN']);
+        return sendJson(res, 200, listSalesmanCatalogue(db, authed));
+      }
+
+      if (method === 'GET' && pathname === '/api/salesman/customers') {
+        const authed = requireRole(actor, ['SALESMAN']);
+        return sendJson(res, 200, listSalesmanCustomers(db, authed));
+      }
+
+      if (method === 'GET' && pathname === '/api/salesman/orders') {
+        const authed = requireRole(actor, ['SALESMAN']);
+        return sendJson(res, 200, listSalesmanOrders(db, authed));
+      }
+
+      if (method === 'POST' && pathname === '/api/salesman/orders') {
+        const authed = requireRole(actor, ['SALESMAN']);
+        const body = await readJsonBody(req);
+        const created = createSalesmanOrder(
+          db,
+          authed,
+          body as Parameters<typeof createSalesmanOrder>[2]
+        );
+        return sendJson(res, 201, created);
+      }
+
+      const salesmanOrderMatch = /^\/api\/salesman\/orders\/([^/]+)$/.exec(pathname);
+      if (method === 'GET' && salesmanOrderMatch) {
+        const authed = requireRole(actor, ['SALESMAN']);
+        return sendJson(
+          res,
+          200,
+          getSalesmanOrderDetail(db, authed, decodeURIComponent(salesmanOrderMatch[1]))
+        );
       }
 
       return sendJson(res, 404, { error: `Route not found: ${method} ${pathname}` });

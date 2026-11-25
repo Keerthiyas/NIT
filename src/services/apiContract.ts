@@ -111,4 +111,28 @@ export const REQUIRED_BACKEND_APIS: ApiEndpointSpec[] = [
     purpose: 'Owner/Super Admin only: manage user accounts, roles, status, and access resets.',
     implemented: true,
   },
+  {
+    method: 'GET',
+    path: '/api/salesman/dashboard',
+    purpose: 'Salesman only: fetch total/pending order counts and recent orders owned by the salesman.',
+    implemented: true,
+  },
+  {
+    method: 'GET',
+    path: '/api/salesman/products',
+    purpose: 'Salesman only: fetch active product catalogue without inventory balances or BOM.',
+    implemented: true,
+  },
+  {
+    method: 'GET',
+    path: '/api/salesman/customers',
+    purpose: 'Salesman only: fetch read-only active customer directory.',
+    implemented: true,
+  },
+  {
+    method: 'POST',
+    path: '/api/salesman/orders',
+    purpose: 'Salesman only: submit single or multi-product order without stock-availability blocking.',
+    implemented: true,
+  },
 ];
