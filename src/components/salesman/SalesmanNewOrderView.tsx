@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
   CheckCircle2,
+  ChevronDown,
   MapPin,
   Minus,
   Phone,
@@ -11,6 +12,7 @@ import {
   ShoppingCart,
   Trash2,
   UserCheck,
+  UserPlus,
   X,
 } from 'lucide-react';
 import { orderAuditService } from '../../services/orderAuditService';
@@ -34,6 +36,21 @@ interface SalesmanNewOrderViewProps {
 }
 
 type OrderFlowStep = 'browse' | 'review' | 'success';
+
+const INDIAN_STATES = [
+  'Tamil Nadu',
+  'Karnataka',
+  'Kerala',
+  'Andhra Pradesh',
+  'Telangana',
+  'Maharashtra',
+  'Gujarat',
+  'Delhi',
+  'West Bengal',
+  'Uttar Pradesh',
+  'Rajasthan',
+  'Puducherry',
+];
 
 function formatInr(val: number): string {
   return `₹${val.toLocaleString('en-IN', {
@@ -63,8 +80,33 @@ export function SalesmanNewOrderView({
 
   // Customer & Note
   const [customerSearch, setCustomerSearch] = useState('');
+  const [customerDropdownOpen, setCustomerDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement | null>(null);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
   const [customerNote, setCustomerNote] = useState('');
+  const [customerSuccessMsg, setCustomerSuccessMsg] = useState<string | null>(null);
+
+  // Add New Customer Modal
+  const [newCustomerModalOpen, setNewCustomerModalOpen] = useState(false);
+  const [ncName, setNcName] = useState('');
+  const [ncContactPerson, setNcContactPerson] = useState('');
+  const [ncPhone, setNcPhone] = useState('');
+  const [ncEmail, setNcEmail] = useState('');
+  const [ncAddress, setNcAddress] = useState('');
+  const [ncState, setNcState] = useState('Tamil Nadu');
+  const [ncGstin, setNcGstin] = useState('');
+  const [ncSaving, setNcSaving] = useState(false);
+  const [ncError, setNcError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleOutsideClick = (ev: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(ev.target as Node)) {
+        setCustomerDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, []);
 
   // Submit & Confirmation
   const [submitting, setSubmitting] = useState(false);
@@ -204,6 +246,7 @@ export function SalesmanNewOrderView({
       onSetCart([]);
       setCustomerNote('');
       setSelectedCustomerId('');
+      setCustomerSuccessMsg(null);
       onOrderCreated(created);
       setStep('success');
     } catch (err) {
@@ -213,8 +256,97 @@ export function SalesmanNewOrderView({
     }
   };
 
+  const openAddCustomerModal = () => {
+    setCustomerDropdownOpen(false);
+    setNcError(null);
+    setNcName('');
+    setNcContactPerson('');
+    setNcPhone('');
+    setNcEmail('');
+    setNcAddress('');
+    setNcState('Tamil Nadu');
+    setNcGstin('');
+    setNewCustomerModalOpen(true);
+  };
+
+  const handleCreateNewCustomer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setNcError(null);
+
+    const trimmedName = ncName.trim();
+    const trimmedPhone = ncPhone.trim();
+    const trimmedAddress = ncAddress.trim();
+    const trimmedGstin = ncGstin.trim().toUpperCase();
+    const trimmedEmail = ncEmail.trim();
+
+    if (!trimmedName || !trimmedPhone || !trimmedAddress || !ncState) {
+      setNcError(
+        'Customer / Business Name, Mobile Number, Address, and State are required.'
+      );
+      return;
+    }
+
+    const rawDigits = trimmedPhone.replace(/\D/g, '');
+    const normalized10 =
+      rawDigits.length === 12 && rawDigits.startsWith('91')
+        ? rawDigits.slice(2)
+        : rawDigits.length === 11 && rawDigits.startsWith('0')
+          ? rawDigits.slice(1)
+          : rawDigits;
+    if (!/^[6-9]\d{9}$/.test(normalized10)) {
+      setNcError(
+        'Please enter a valid 10-digit Indian mobile number (starting with 6-9).'
+      );
+      return;
+    }
+
+    if (trimmedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      setNcError('Please enter a valid email address.');
+      return;
+    }
+
+    if (
+      trimmedGstin &&
+      !/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(trimmedGstin)
+    ) {
+      setNcError('Invalid 15-character GSTIN format (e.g., 33AAACN1234A1Z5).');
+      return;
+    }
+
+    setNcSaving(true);
+    try {
+      const created = await orderAuditService.createSalesmanCustomer({
+        name: trimmedName,
+        contactPerson: ncContactPerson.trim() || undefined,
+        phone: trimmedPhone,
+        email: trimmedEmail || undefined,
+        address: trimmedAddress,
+        state: ncState,
+        gstin: trimmedGstin || undefined,
+      });
+
+      setCustomers((prev) =>
+        [...prev, created].sort((a, b) => a.name.localeCompare(b.name))
+      );
+      setSelectedCustomerId(created.id);
+      setCustomerSearch('');
+      setCustomerSuccessMsg(
+        `New customer "${created.name}" (${created.code}) registered and selected for this order.`
+      );
+      setError(null);
+      setNewCustomerModalOpen(false);
+    } catch (err) {
+      setNcError(
+        err instanceof Error ? err.message : 'Failed to register customer.'
+      );
+    } finally {
+      setNcSaving(false);
+    }
+  };
+
   const startAnotherOrder = () => {
     setSubmittedOrder(null);
+    setCustomerSuccessMsg(null);
     setError(null);
     setStep('browse');
   };
@@ -295,81 +427,179 @@ export function SalesmanNewOrderView({
         )}
 
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          {/* Customer Selection */}
+          {/* Customer Selection (Searchable Dropdown + Add New Customer) */}
           <div className="lg:col-span-6 space-y-3">
-            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-xs space-y-3">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900">
-                  1. Select Customer
-                </h2>
-                <p className="text-xs text-slate-500">
-                  Choose an active customer account from the directory.
-                </p>
-              </div>
-
-              <div className="relative">
-                <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-                <input
-                  type="search"
-                  value={customerSearch}
-                  onChange={(e) => setCustomerSearch(e.target.value)}
-                  placeholder="Search customer by name, code, contact, or address..."
-                  className="w-full rounded-lg border border-slate-300 bg-white pl-9 pr-3 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-700 focus:outline-none"
-                />
-              </div>
-
-              <div className="max-h-96 overflow-y-auto space-y-2 pr-1">
-                {filteredCustomers.map((cust) => {
-                  const isSelected = cust.id === selectedCustomerId;
-                  return (
-                    <button
-                      key={cust.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedCustomerId(cust.id);
-                        setError(null);
-                      }}
-                      className={`w-full text-left rounded-lg border p-3 transition-all ${
-                        isSelected
-                          ? 'border-blue-700 bg-blue-50/70 ring-1 ring-blue-700'
-                          : 'border-slate-200 bg-white hover:border-blue-300 hover:bg-slate-50/70'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <p className="text-sm font-semibold text-slate-900">
-                            {cust.name}
-                          </p>
-                          <p className="text-[11px] font-mono text-slate-500">
-                            {cust.code} • {cust.state}
-                          </p>
-                        </div>
-                        {isSelected && (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-blue-700 px-2 py-0.5 text-[10px] font-semibold text-white">
-                            <UserCheck className="h-3 w-3" />
-                            Selected
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-2 space-y-0.5 text-xs text-slate-600">
-                        <p className="flex items-center gap-1.5">
-                          <Phone className="h-3 w-3 text-slate-400" />
-                          {cust.contactPerson} • {cust.phone}
-                        </p>
-                        <p className="flex items-start gap-1.5">
-                          <MapPin className="h-3 w-3 text-slate-400 shrink-0 mt-0.5" />
-                          <span>{cust.deliveryAddress}</span>
-                        </p>
-                      </div>
-                    </button>
-                  );
-                })}
-                {filteredCustomers.length === 0 && (
-                  <p className="py-6 text-center text-xs text-slate-500">
-                    No customers match your search.
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-xs space-y-3.5">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    1. Select Customer
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Choose an existing customer or register a new customer for this order.
                   </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={openAddCustomerModal}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 transition-colors"
+                >
+                  <UserPlus className="h-3.5 w-3.5" />
+                  + Add New Customer
+                </button>
+              </div>
+
+              {customerSuccessMsg && (
+                <div className="flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900 anim-fade-in-up">
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600 mt-0.5" />
+                  <span>{customerSuccessMsg}</span>
+                </div>
+              )}
+
+              {/* Searchable Customer Dropdown */}
+              <div ref={dropdownRef} className="relative">
+                <button
+                  type="button"
+                  aria-haspopup="listbox"
+                  aria-expanded={customerDropdownOpen}
+                  onClick={() => setCustomerDropdownOpen((o) => !o)}
+                  className="w-full flex items-center justify-between gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-left text-xs hover:border-blue-600 focus:border-blue-700 focus:outline-none transition-colors"
+                >
+                  {selectedCustomer ? (
+                    <span className="truncate font-medium text-slate-900">
+                      {selectedCustomer.name}{' '}
+                      <span className="font-mono text-slate-500">
+                        ({selectedCustomer.code})
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="text-slate-400">
+                      Search and select an existing customer...
+                    </span>
+                  )}
+                  <ChevronDown
+                    className={`h-4 w-4 shrink-0 text-slate-400 transition-transform duration-150 ${
+                      customerDropdownOpen ? 'rotate-180' : ''
+                    }`}
+                  />
+                </button>
+
+                {customerDropdownOpen && (
+                  <div className="absolute z-30 mt-1.5 w-full rounded-xl border border-slate-200 bg-white shadow-lg overflow-hidden anim-fade-in-up">
+                    <div className="border-b border-slate-100 p-2 bg-slate-50/70">
+                      <div className="relative">
+                        <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-400" />
+                        <input
+                          type="search"
+                          autoFocus
+                          value={customerSearch}
+                          onChange={(e) => setCustomerSearch(e.target.value)}
+                          placeholder="Search by name, code, mobile, or address..."
+                          className="w-full rounded-md border border-slate-300 bg-white pl-8 pr-2.5 py-1.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-700 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div
+                      role="listbox"
+                      className="max-h-60 overflow-y-auto divide-y divide-slate-100"
+                    >
+                      {filteredCustomers.map((cust) => {
+                        const isSelected = cust.id === selectedCustomerId;
+                        return (
+                          <button
+                            key={cust.id}
+                            type="button"
+                            role="option"
+                            aria-selected={isSelected}
+                            onClick={() => {
+                              setSelectedCustomerId(cust.id);
+                              setCustomerDropdownOpen(false);
+                              setCustomerSuccessMsg(null);
+                              setError(null);
+                            }}
+                            className={`w-full text-left px-3 py-2.5 text-xs transition-colors flex items-start justify-between gap-2 ${
+                              isSelected
+                                ? 'bg-blue-50 text-blue-950'
+                                : 'hover:bg-slate-50 text-slate-800'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <p className="font-semibold text-slate-900 truncate">
+                                {cust.name}
+                              </p>
+                              <p className="text-[11px] text-slate-500 truncate">
+                                <span className="font-mono">{cust.code}</span> •{' '}
+                                {cust.phone} • {cust.state}
+                              </p>
+                            </div>
+                            {isSelected && (
+                              <UserCheck className="h-4 w-4 shrink-0 text-blue-700 mt-0.5" />
+                            )}
+                          </button>
+                        );
+                      })}
+
+                      {filteredCustomers.length === 0 && (
+                        <p className="px-3 py-4 text-center text-xs text-slate-500">
+                          No existing customers match &ldquo;{customerSearch}&rdquo;.
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="border-t border-slate-200 bg-slate-50 p-2">
+                      <button
+                        type="button"
+                        onClick={openAddCustomerModal}
+                        className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800 transition-colors"
+                      >
+                        <UserPlus className="h-3.5 w-3.5" />
+                        + Add New Customer
+                      </button>
+                    </div>
+                  </div>
                 )}
               </div>
+
+              {/* Selected Customer Preview Card */}
+              {selectedCustomer ? (
+                <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-3.5 space-y-1.5 text-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900">
+                        {selectedCustomer.name}
+                      </p>
+                      <p className="text-[11px] font-mono text-slate-500">
+                        {selectedCustomer.code} • {selectedCustomer.state}
+                      </p>
+                    </div>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-blue-700 px-2 py-0.5 text-[10px] font-semibold text-white">
+                      <UserCheck className="h-3 w-3" />
+                      Selected
+                    </span>
+                  </div>
+                  <p className="flex items-center gap-1.5 text-slate-600 pt-1">
+                    <Phone className="h-3.5 w-3.5 text-slate-400" />
+                    {selectedCustomer.contactPerson} • {selectedCustomer.phone}
+                  </p>
+                  <p className="flex items-start gap-1.5 text-slate-600">
+                    <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0 mt-0.5" />
+                    <span>{selectedCustomer.deliveryAddress}</span>
+                  </p>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50/70 p-4 text-center text-xs text-slate-500">
+                  Use the searchable dropdown above to select an existing customer, or click{' '}
+                  <button
+                    type="button"
+                    onClick={openAddCustomerModal}
+                    className="font-semibold text-blue-700 hover:underline"
+                  >
+                    + Add New Customer
+                  </button>
+                  .
+                </div>
+              )}
             </div>
           </div>
 
@@ -467,6 +697,173 @@ export function SalesmanNewOrderView({
             </div>
           </div>
         </div>
+
+        {/* Add New Customer Modal */}
+        {newCustomerModalOpen && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4 overflow-y-auto"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-customer-modal-title"
+          >
+            <form
+              onSubmit={(e) => void handleCreateNewCustomer(e)}
+              className="w-full max-w-lg rounded-xl border border-slate-200 bg-white shadow-xl my-auto anim-scale-pop"
+            >
+              <header className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5">
+                <div className="flex items-center gap-2">
+                  <UserPlus className="h-4 w-4 text-blue-700" />
+                  <h3
+                    id="add-customer-modal-title"
+                    className="text-sm font-semibold text-slate-900"
+                  >
+                    Register New Customer
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setNewCustomerModalOpen(false)}
+                  aria-label="Close modal"
+                  className="rounded p-1 text-slate-500 hover:bg-slate-100"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </header>
+
+              <div className="p-5 space-y-3 text-xs">
+                <p className="rounded-lg border border-blue-100 bg-blue-50/70 px-3 py-2 text-blue-900">
+                  Saved directly to the customer directory and selected for your current cart.
+                </p>
+
+                {ncError && (
+                  <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-rose-800">
+                    <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                    <span>{ncError}</span>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="sm:col-span-2">
+                    <label className="block font-medium text-slate-700 mb-1">
+                      Customer / Business Name <span className="text-rose-600">*</span>
+                    </label>
+                    <input
+                      required
+                      type="text"
+                      value={ncName}
+                      onChange={(e) => setNcName(e.target.value)}
+                      placeholder="e.g., Trichy Campus Bakery & Mart"
+                      className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-900 focus:border-blue-700 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">
+                      Contact Person
+                    </label>
+                    <input
+                      type="text"
+                      value={ncContactPerson}
+                      onChange={(e) => setNcContactPerson(e.target.value)}
+                      placeholder="e.g., S. Ramesh"
+                      className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-900 focus:border-blue-700 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">
+                      Mobile Number <span className="text-rose-600">*</span>
+                    </label>
+                    <input
+                      required
+                      type="tel"
+                      value={ncPhone}
+                      onChange={(e) => setNcPhone(e.target.value)}
+                      placeholder="e.g., 9876543210"
+                      className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-900 focus:border-blue-700 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">
+                      Email (optional)
+                    </label>
+                    <input
+                      type="email"
+                      value={ncEmail}
+                      onChange={(e) => setNcEmail(e.target.value)}
+                      placeholder="orders@customer.in"
+                      className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-900 focus:border-blue-700 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">
+                      State <span className="text-rose-600">*</span>
+                    </label>
+                    <select
+                      required
+                      value={ncState}
+                      onChange={(e) => setNcState(e.target.value)}
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-900 focus:border-blue-700 focus:outline-none"
+                    >
+                      {INDIAN_STATES.map((st) => (
+                        <option key={st} value={st}>
+                          {st}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block font-medium text-slate-700 mb-1">
+                      Address <span className="text-rose-600">*</span>
+                    </label>
+                    <textarea
+                      required
+                      rows={2}
+                      value={ncAddress}
+                      onChange={(e) => setNcAddress(e.target.value)}
+                      placeholder="Door No, Street, Area, City, Pincode"
+                      className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-900 focus:border-blue-700 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block font-medium text-slate-700 mb-1">
+                      GSTIN (optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={ncGstin}
+                      onChange={(e) => setNcGstin(e.target.value.toUpperCase())}
+                      placeholder="15-character GSTIN (e.g., 33AABCT1234F1Z2)"
+                      className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-mono uppercase text-slate-900 focus:border-blue-700 focus:outline-none"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <footer className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
+                <button
+                  type="button"
+                  onClick={() => setNewCustomerModalOpen(false)}
+                  className="rounded-lg border border-slate-300 px-3.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={ncSaving}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-700 px-4 py-1.5 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50"
+                >
+                  <UserPlus className="h-3.5 w-3.5" />
+                  {ncSaving ? 'Saving Customer...' : 'Save & Select Customer'}
+                </button>
+              </footer>
+            </form>
+          </div>
+        )}
       </div>
     );
   }
@@ -829,3 +1226,4 @@ export function SalesmanNewOrderView({
     </div>
   );
 }
+

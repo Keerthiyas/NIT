@@ -467,6 +467,21 @@ export const orderAuditService = {
     return fetchJson<SalesmanCustomer[]>('/api/salesman/customers');
   },
 
+  async createSalesmanCustomer(payload: {
+    name: string;
+    contactPerson?: string;
+    phone: string;
+    email?: string;
+    address: string;
+    state: string;
+    gstin?: string;
+  }): Promise<SalesmanCustomer> {
+    return fetchJson<SalesmanCustomer>('/api/salesman/customers', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
   async listSalesmanOrders(): Promise<SalesmanOrder[]> {
     return fetchJson<SalesmanOrder[]>('/api/salesman/orders');
   },

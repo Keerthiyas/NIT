@@ -38,6 +38,75 @@ const INDIAN_STATE_CODES: Record<string, string> = {
   Puducherry: '34',
 };
 
+const GSTIN_REGEX = /^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+
+function normalizeMobileDigits(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length === 12 && digits.startsWith('91')) {
+    return digits.slice(2);
+  }
+  if (digits.length === 11 && digits.startsWith('0')) {
+    return digits.slice(1);
+  }
+  return digits;
+}
+
+function validateMobileNumber(phone: string): string {
+  const normalized = normalizeMobileDigits(phone);
+  if (!/^[6-9]\d{9}$/.test(normalized)) {
+    throw new HttpError(
+      400,
+      'Please enter a valid 10-digit Indian mobile number (starting with 6-9).'
+    );
+  }
+  return normalized;
+}
+
+function validateAndNormalizeGstin(gstin?: string): string {
+  const trimmed = (gstin ?? '').trim().toUpperCase();
+  if (!trimmed) return '';
+  if (!GSTIN_REGEX.test(trimmed)) {
+    throw new HttpError(
+      400,
+      'Invalid GSTIN format. Expected 15-character GSTIN (e.g., 33AAACN1234A1Z5).'
+    );
+  }
+  return trimmed;
+}
+
+function assertNoDuplicateCustomer(
+  db: DatabaseSync,
+  normalizedMobile: string,
+  normalizedGstin: string,
+  excludeCustomerId?: string
+): void {
+  const existing = db
+    .prepare(`SELECT id, code, name, phone, gstin FROM customers`)
+    .all() as Array<{
+    id: string;
+    code: string;
+    name: string;
+    phone: string;
+    gstin: string;
+  }>;
+
+  for (const row of existing) {
+    if (excludeCustomerId && row.id === excludeCustomerId) continue;
+    if (normalizedMobile && normalizeMobileDigits(row.phone) === normalizedMobile) {
+      throw new HttpError(
+        409,
+        `A customer with mobile number ${row.phone} already exists (${row.name} - ${row.code}).`
+      );
+    }
+    if (normalizedGstin && row.gstin.trim().toUpperCase() === normalizedGstin) {
+      throw new HttpError(
+        409,
+        `A customer with GSTIN ${normalizedGstin} already exists (${row.name} - ${row.code}).`
+      );
+    }
+  }
+}
+
 function uid(prefix: string): string {
   return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -3335,6 +3404,97 @@ export function listSalesmanCustomers(db: DatabaseSync, actor: AuthUser) {
     deliveryAddress: c.delivery_address,
     state: c.state,
   }));
+}
+
+/**
+ * Allows an authenticated Salesman to register a new customer during order creation.
+ * Validates required fields, mobile format, optional GSTIN, and checks duplicates.
+ */
+export function createSalesmanCustomer(
+  db: DatabaseSync,
+  actor: AuthUser,
+  input: {
+    name: string;
+    contactPerson?: string;
+    phone: string;
+    email?: string;
+    address: string;
+    state: string;
+    gstin?: string;
+  }
+) {
+  requireRole(actor, ['SALESMAN']);
+
+  const name = (input.name ?? '').trim();
+  const phoneRaw = (input.phone ?? '').trim();
+  const address = (input.address ?? '').trim();
+  const state = (input.state ?? '').trim();
+  const contactPerson = (input.contactPerson ?? '').trim() || name;
+  const email = (input.email ?? '').trim();
+
+  if (!name || !phoneRaw || !address || !state) {
+    throw new HttpError(
+      400,
+      'Customer / Business Name, Mobile Number, Address, and State are required.'
+    );
+  }
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new HttpError(400, 'Please enter a valid email address.');
+  }
+
+  const normalizedMobile = validateMobileNumber(phoneRaw);
+  const normalizedGstin = validateAndNormalizeGstin(input.gstin);
+  const stateCode = INDIAN_STATE_CODES[state] || '99';
+
+  return runInTransaction(db, () => {
+    assertNoDuplicateCustomer(db, normalizedMobile, normalizedGstin);
+
+    const nowIso = new Date().toISOString();
+    const id = uid('cust');
+    const code = nextSequenceNumber(db, 'customers', 'code', 'CUST-REG-');
+
+    db.prepare(
+      `INSERT INTO customers (
+        id, code, name, contact_person, phone, email, gstin,
+        billing_address, delivery_address, state, state_code, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+    ).run(
+      id,
+      code,
+      name,
+      contactPerson,
+      phoneRaw,
+      email,
+      normalizedGstin,
+      address,
+      address,
+      state,
+      stateCode,
+      nowIso,
+      nowIso
+    );
+
+    recordAuditLog(
+      db,
+      actor,
+      'CUSTOMER',
+      id,
+      'SALESMAN_CREATE_CUSTOMER',
+      `${code} (${name}) registered during order creation`
+    );
+
+    return {
+      id,
+      code,
+      name,
+      contactPerson,
+      phone: phoneRaw,
+      email,
+      billingAddress: address,
+      deliveryAddress: address,
+      state,
+    };
+  });
 }
 
 function sanitizeAuditActionForSalesman(toStatus: string): string {

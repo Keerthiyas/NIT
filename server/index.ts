@@ -18,6 +18,7 @@ import { seedDatabaseIfEmpty } from './seed.ts';
 import {
   createInvoiceFromDispatchByAccountant,
   createPurchaseOrder,
+  createSalesmanCustomer,
   createSalesmanOrder,
   createUserByOwner,
   evaluateOrderAvailability,
@@ -512,6 +513,17 @@ export function createApiHandler(db: DatabaseSync) {
       if (method === 'GET' && pathname === '/api/salesman/customers') {
         const authed = requireRole(actor, ['SALESMAN']);
         return sendJson(res, 200, listSalesmanCustomers(db, authed));
+      }
+
+      if (method === 'POST' && pathname === '/api/salesman/customers') {
+        const authed = requireRole(actor, ['SALESMAN']);
+        const body = await readJsonBody(req);
+        const created = createSalesmanCustomer(
+          db,
+          authed,
+          body as Parameters<typeof createSalesmanCustomer>[2]
+        );
+        return sendJson(res, 201, created);
       }
 
       if (method === 'GET' && pathname === '/api/salesman/orders') {

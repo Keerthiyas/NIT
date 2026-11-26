@@ -518,4 +518,126 @@ describe('Order-to-Audit Backend RBAC, Inventory Ledger, Production & Billing Wo
     expect(detailText).toContain('PRODUCTION_REQUIRED');
     expect(detailText).not.toContain('INTERNAL ADMIN NOTE');
   });
+
+  it('allows Salesman to register a new customer during order creation with duplicate & RBAC validation', async () => {
+    const salesmanToken = String(
+      (
+        await callApi(handler, 'POST', '/api/auth/login', undefined, {
+          email: 'salesman@nitt.local',
+          password: 'password123',
+        })
+      ).data.token
+    );
+
+    // 1. Rejects missing required fields and invalid mobile format
+    const badMobile = await callApi(
+      handler,
+      'POST',
+      '/api/salesman/customers',
+      salesmanToken,
+      {
+        name: 'Bad Mobile Store',
+        phone: '12345',
+        address: 'Trichy',
+        state: 'Tamil Nadu',
+      }
+    );
+    expect(badMobile.status).toBe(400);
+
+    // 2. Rejects duplicate mobile number against existing seeded customer (+91-98421-10004)
+    const dupMobile = await callApi(
+      handler,
+      'POST',
+      '/api/salesman/customers',
+      salesmanToken,
+      {
+        name: 'Duplicate Mobile Store',
+        phone: '9842110004',
+        address: 'Trichy',
+        state: 'Tamil Nadu',
+      }
+    );
+    expect(dupMobile.status).toBe(409);
+
+    // 3. Rejects duplicate GSTIN against existing seeded customer (33AAACN1234A1Z5)
+    const dupGstin = await callApi(
+      handler,
+      'POST',
+      '/api/salesman/customers',
+      salesmanToken,
+      {
+        name: 'Duplicate GSTIN Store',
+        phone: '9876501234',
+        address: 'Trichy',
+        state: 'Tamil Nadu',
+        gstin: '33AAACN1234A1Z5',
+      }
+    );
+    expect(dupGstin.status).toBe(409);
+
+    // 4. Registers a valid new customer and immediately places an order for them
+    const createCust = await callApi(
+      handler,
+      'POST',
+      '/api/salesman/customers',
+      salesmanToken,
+      {
+        name: 'Thillai Nagar Provision Mart',
+        contactPerson: 'S. Karthikeyan',
+        phone: '9876543210',
+        email: 'mart@thillainagar.in',
+        address: '12 Salai Road, Thillai Nagar, Trichy - 620018',
+        state: 'Tamil Nadu',
+        gstin: '33AABCT5566K1Z9',
+      }
+    );
+    expect(createCust.status).toBe(201);
+    const newCustId = String(createCust.data.id);
+    expect(createCust.data.code).toMatch(/^CUST-REG-\d+/);
+
+    const newOrder = await callApi(
+      handler,
+      'POST',
+      '/api/salesman/orders',
+      salesmanToken,
+      {
+        customerId: newCustId,
+        items: [{ productId: 'prod-mrk-200', quantity: 25 }],
+        customerNote: 'First order for new customer',
+      }
+    );
+    expect(newOrder.status).toBe(201);
+    expect(newOrder.data.customerName).toBe('Thillai Nagar Provision Mart');
+
+    // 5. Admin sees the new customer in Management -> Customers and cannot be edited/deleted by Salesman
+    const adminCusts = (
+      await callApi(handler, 'GET', '/api/management/customers', adminToken)
+    ).data as unknown as Array<{ id: string; name: string }>;
+    expect(adminCusts.some((c) => c.id === newCustId)).toBe(true);
+
+    expect(
+      (
+        await callApi(handler, 'PUT', `/api/management/customers/${newCustId}`, salesmanToken, {
+          code: 'HACK',
+          name: 'Hacked',
+          contactPerson: 'X',
+          phone: '9876543210',
+          billingAddress: 'A',
+          deliveryAddress: 'A',
+          state: 'Tamil Nadu',
+        })
+      ).status
+    ).toBe(403);
+    expect(
+      (
+        await callApi(
+          handler,
+          'PATCH',
+          `/api/management/customers/${newCustId}/status`,
+          salesmanToken,
+          { isActive: false }
+        )
+      ).status
+    ).toBe(403);
+  });
 });

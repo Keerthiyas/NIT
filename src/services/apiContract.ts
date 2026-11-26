@@ -131,6 +131,12 @@ export const REQUIRED_BACKEND_APIS: ApiEndpointSpec[] = [
   },
   {
     method: 'POST',
+    path: '/api/salesman/customers',
+    purpose: 'Salesman only: register a new customer during order creation with duplicate checks.',
+    implemented: true,
+  },
+  {
+    method: 'POST',
     path: '/api/salesman/orders',
     purpose: 'Salesman only: submit single or multi-product order without stock-availability blocking.',
     implemented: true,
