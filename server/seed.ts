@@ -273,10 +273,15 @@ export function seedDatabaseIfEmpty(db: DatabaseSync): void {
     insertPr.run('pr-ord-141', 'PR-2026-0001', 'ord-2026-0141', 'prod-rib-200', toScaledQty(60), 'PENDING_SUPERVISOR_REVIEW', null, 'Pending Supervisor Review', '2026-11-24T14:05:00.000Z', 'Admin', 'Awaiting supervisor batch scheduling.', '2026-11-24T14:05:00.000Z');
     insertPr.run('pr-ord-137', 'PR-2026-0000', 'ord-2026-0137', 'prod-mrk-200', toScaledQty(50), 'COMPLETED', 'usr-supervisor', 'Completed & Posted', '2026-11-20T10:00:00.000Z', 'Admin', 'Batch completed by supervisor.', '2026-11-20T15:30:00.000Z');
 
-    // 8. Seed 1 Completed Production Run for PR-2026-0000 (planned 50, actual 48, wastage 2, variance -2)
+    // 8. Seed 1 Completed Production Run for PR-2026-0000 (planned 50, actual 48, rejected 2, yield 96%)
     db.prepare(`
-      INSERT INTO production_runs (id, run_number, production_request_id, product_id, planned_qty_scaled, actual_output_qty_scaled, wastage_qty_scaled, variance_qty_scaled, status, supervisor_user_id, supervisor_name, posted_at, notes, idempotency_key)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'POSTED', ?, ?, ?, ?, ?)
+      INSERT INTO production_runs (
+        id, run_number, production_request_id, product_id, bom_version,
+        planned_qty_scaled, actual_output_qty_scaled, rejected_qty_scaled, damaged_packaging_qty_scaled,
+        wastage_qty_scaled, variance_qty_scaled, yield_percent_bps, quality_result, status,
+        supervisor_user_id, supervisor_name, created_by_name, started_at, completed_at, posted_at, notes, idempotency_key
+      )
+      VALUES (?, ?, ?, ?, 'v1.0', ?, ?, ?, ?, ?, ?, ?, 'PASSED', 'POSTED', ?, ?, 'Meenakshi Sundaram (Admin)', '2026-11-20T11:00:00.000Z', '2026-11-20T15:25:00.000Z', ?, ?, ?)
     `).run(
       'run-2026-0001',
       'RUN-2026-0001',
@@ -285,7 +290,10 @@ export function seedDatabaseIfEmpty(db: DatabaseSync): void {
       toScaledQty(50),
       toScaledQty(48),
       toScaledQty(2),
+      toScaledQty(2),
+      toScaledQty(2),
       -toScaledQty(2),
+      9600,
       'usr-supervisor',
       'Karthik Raja (Supervisor)',
       '2026-11-20T15:30:00.000Z',
@@ -294,14 +302,18 @@ export function seedDatabaseIfEmpty(db: DatabaseSync): void {
     );
 
     const insertRunCons = db.prepare(`
-      INSERT INTO production_run_consumptions (id, production_run_id, material_id, planned_qty_scaled, actual_consumed_qty_scaled, wastage_qty_scaled)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO production_run_consumptions (
+        id, production_run_id, material_id, planned_qty_scaled, actual_consumed_qty_scaled,
+        additional_consumed_qty_scaled, damaged_qty_scaled, wastage_qty_scaled,
+        variance_qty_scaled, variance_percent_bps, reason
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    insertRunCons.run('rc-1', 'run-2026-0001', 'rm-rice-flour', toScaledQty(6), toScaledQty(6.2), toScaledQty(0.2));
-    insertRunCons.run('rc-2', 'run-2026-0001', 'rm-urad-flour', toScaledQty(2), toScaledQty(2.0), 0);
-    insertRunCons.run('rc-3', 'run-2026-0001', 'rm-groundnut-oil', toScaledQty(2.5), toScaledQty(2.6), toScaledQty(0.1));
-    insertRunCons.run('rc-4', 'run-2026-0001', 'rm-spice-mix', toScaledQty(0.5), toScaledQty(0.5), 0);
-    insertRunCons.run('rc-5', 'run-2026-0001', 'pkg-pouch-200', toScaledQty(50), toScaledQty(50), toScaledQty(2));
+    insertRunCons.run('rc-1', 'run-2026-0001', 'rm-rice-flour', toScaledQty(6), toScaledQty(6.2), toScaledQty(0.2), 0, toScaledQty(0.2), toScaledQty(0.2), 333, 'Slight dough moisture adjustment');
+    insertRunCons.run('rc-2', 'run-2026-0001', 'rm-urad-flour', toScaledQty(2), toScaledQty(2.0), 0, 0, 0, 0, 0, '');
+    insertRunCons.run('rc-3', 'run-2026-0001', 'rm-groundnut-oil', toScaledQty(2.5), toScaledQty(2.6), toScaledQty(0.1), 0, toScaledQty(0.1), toScaledQty(0.1), 400, 'Frying pan top-up');
+    insertRunCons.run('rc-4', 'run-2026-0001', 'rm-spice-mix', toScaledQty(0.5), toScaledQty(0.5), 0, 0, 0, 0, 0, '');
+    insertRunCons.run('rc-5', 'run-2026-0001', 'pkg-pouch-200', toScaledQty(50), toScaledQty(50), 0, toScaledQty(2), 0, 0, 0, '2 pouches damaged at heat sealer');
 
     // 9. Seed Dispatches, Invoices (Intra-State CGST+SGST & Inter-State IGST), and Partial Payment
     const insertDisp = db.prepare(`

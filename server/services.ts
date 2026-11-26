@@ -107,11 +107,11 @@ function assertNoDuplicateCustomer(
   }
 }
 
-function uid(prefix: string): string {
+export function uid(prefix: string): string {
   return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-function nextSequenceNumber(
+export function nextSequenceNumber(
   db: DatabaseSync,
   table: string,
   column: string,
@@ -131,7 +131,7 @@ function nextSequenceNumber(
   return `${prefix}${String(maxSeq + 1).padStart(4, '0')}`;
 }
 
-function recordAuditLog(
+export function recordAuditLog(
   db: DatabaseSync,
   actor: AuthUser,
   entityType: string,
@@ -155,14 +155,15 @@ function recordAuditLog(
   );
 }
 
-interface StockMovementParams {
+export interface StockMovementParams {
   itemId: string;
   movementType:
     | 'OPENING_BALANCE'
     | 'PURCHASE_RECEIPT'
     | 'PRODUCTION_CONSUMPTION'
     | 'PRODUCTION_OUTPUT'
-    | 'DISPATCH';
+    | 'DISPATCH'
+    | 'DISCREPANCY_ADJUSTMENT';
   direction: 'IN' | 'OUT';
   qtyScaled: number;
   referenceType: string;
@@ -173,7 +174,7 @@ interface StockMovementParams {
   nowIso: string;
 }
 
-function applyStockMovement(db: DatabaseSync, params: StockMovementParams): number {
+export function applyStockMovement(db: DatabaseSync, params: StockMovementParams): number {
   if (params.qtyScaled <= 0) {
     throw new HttpError(400, 'Stock movement quantity must be greater than zero.');
   }
@@ -575,7 +576,14 @@ export function recalculateOpenShortageQueries(
       .get(prId) as
       | { id: string; status: string; product_id: string; requested_qty_scaled: number }
       | undefined;
-    if (!pr || pr.status !== 'AWAITING_MATERIALS') continue;
+    if (
+      !pr ||
+      (pr.status !== 'AWAITING_MATERIALS' &&
+        pr.status !== 'MATERIAL_SHORTAGE' &&
+        pr.status !== 'PENDING_MATERIAL_CHECK')
+    ) {
+      continue;
+    }
 
     const remainingShortages = db
       .prepare(
@@ -879,6 +887,7 @@ export function submitOrderDecision(
     }
 
     const analysis = evaluateOrderAvailability(db, orderId);
+
     const nowIso = new Date().toISOString();
     let nextStatus = order.status;
     let actionLabel = '';
@@ -1059,6 +1068,7 @@ export function listInventoryItems(db: DatabaseSync) {
     gst_rate_bps: number;
     hsn_code: string;
     image_url: string;
+    bom_version: string;
     reorder_level_scaled: number;
     is_active: number;
     quantity_scaled: number;
@@ -1067,6 +1077,39 @@ export function listInventoryItems(db: DatabaseSync) {
     created_at: string;
     updated_at: string;
   }>;
+
+  const usedInRows = db
+    .prepare(
+      `SELECT b.material_id, p.id AS product_id, p.name AS product_name, p.sku AS product_sku, b.quantity_per_unit_scaled, p.unit AS product_unit
+       FROM bom_items b
+       JOIN inventory_items p ON p.id = b.product_id
+       WHERE p.is_active = 1
+       ORDER BY p.name`
+    )
+    .all() as Array<{
+    material_id: string;
+    product_id: string;
+    product_name: string;
+    product_sku: string;
+    quantity_per_unit_scaled: number;
+    product_unit: string;
+  }>;
+
+  const usedInMap = new Map<
+    string,
+    Array<{ productId: string; productName: string; productSku: string; quantityPerUnit: number; productUnit: string }>
+  >();
+  for (const row of usedInRows) {
+    const arr = usedInMap.get(row.material_id) ?? [];
+    arr.push({
+      productId: row.product_id,
+      productName: row.product_name,
+      productSku: row.product_sku,
+      quantityPerUnit: fromScaledQty(row.quantity_per_unit_scaled),
+      productUnit: row.product_unit,
+    });
+    usedInMap.set(row.material_id, arr);
+  }
 
   return rows.map((r) => ({
     id: r.id,
@@ -1079,6 +1122,8 @@ export function listInventoryItems(db: DatabaseSync) {
     gstRate: fromGstBps(r.gst_rate_bps),
     hsnCode: r.hsn_code,
     imageUrl: r.image_url || undefined,
+    bomVersion: r.bom_version || 'v1.0',
+    usedInProducts: usedInMap.get(r.id) ?? [],
     availableStock: fromScaledQty(r.quantity_scaled),
     reorderLevel: fromScaledQty(r.reorder_level_scaled),
     isActive: Boolean(r.is_active),
@@ -1145,7 +1190,7 @@ export function listProductionRequests(db: DatabaseSync) {
   const rows = db
     .prepare(
       `SELECT pr.*, o.order_number, c.name AS customer_name,
-              p.name AS product_name, p.sku AS product_sku, p.unit,
+              p.name AS product_name, p.sku AS product_sku, p.unit, p.bom_version,
               u.full_name AS assigned_supervisor_name
        FROM production_requests pr
        JOIN orders o ON o.id = pr.order_id
@@ -1164,8 +1209,12 @@ export function listProductionRequests(db: DatabaseSync) {
     product_name: string;
     product_sku: string;
     unit: string;
+    bom_version: string;
     requested_qty_scaled: number;
     status: string;
+    priority: string;
+    reason: string;
+    started_at: string;
     assigned_supervisor_id: string | null;
     assigned_supervisor_name: string | null;
     supervisor_status: string;
@@ -1251,11 +1300,15 @@ export function listProductionRequests(db: DatabaseSync) {
       productName: r.product_name,
       productSku: r.product_sku,
       unit: r.unit,
+      bomVersion: r.bom_version || 'v1.0',
       requestedQuantity: fromScaledQty(r.requested_qty_scaled),
       rawMaterialAvailability: hasInsufficientLive ? ('INSUFFICIENT' as const) : ('SUFFICIENT' as const),
       materialsToPurchase,
       bomMaterials,
       status: r.status,
+      priority: r.priority || 'NORMAL',
+      reason: r.reason || 'Customer Order Shortage',
+      startedAt: r.started_at || undefined,
       assignedSupervisorId: r.assigned_supervisor_id || undefined,
       assignedSupervisorName: r.assigned_supervisor_name || undefined,
       supervisorStatus: r.supervisor_status,
@@ -1332,6 +1385,8 @@ export function listMaterialShortageQueries(db: DatabaseSync) {
   });
 }
 
+export const PURCHASE_OWNER_APPROVAL_LIMIT_PAISE = 1000000; // ₹10,000.00
+
 export function listPurchaseOrders(db: DatabaseSync) {
   const pos = db
     .prepare(
@@ -1348,6 +1403,10 @@ export function listPurchaseOrders(db: DatabaseSync) {
     supplier_code: string;
     status: string;
     order_date: string;
+    estimated_total_paise: number;
+    approval_status: string;
+    approved_by: string;
+    approved_at: string;
     notes: string;
     created_by: string;
     created_at: string;
@@ -1381,6 +1440,10 @@ export function listPurchaseOrders(db: DatabaseSync) {
       supplierCode: po.supplier_code,
       status: po.status,
       orderDate: po.order_date,
+      estimatedTotal: fromPaise(po.estimated_total_paise ?? 0),
+      approvalStatus: po.approval_status || 'NOT_REQUIRED',
+      approvedBy: po.approved_by || undefined,
+      approvedAt: po.approved_at || undefined,
       notes: po.notes || undefined,
       createdBy: po.created_by,
       createdAt: po.created_at,
@@ -1406,6 +1469,7 @@ export function createPurchaseOrder(
     supplierId: string;
     items: Array<{ itemId: string; orderedQuantity: number; unitCost?: number }>;
     shortageQueryIds?: string[];
+    purchaseRequirementIds?: string[];
     notes?: string;
   }
 ) {
@@ -1427,16 +1491,8 @@ export function createPurchaseOrder(
     const poNumber = nextSequenceNumber(db, 'purchase_orders', 'po_number', 'PO-2026-');
     const poId = uid('po');
 
-    db.prepare(
-      `INSERT INTO purchase_orders (id, po_number, supplier_id, status, order_date, notes, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, 'ORDERED', ?, ?, ?, ?, ?)`
-    ).run(poId, poNumber, sup.id, nowIso.slice(0, 10), input.notes?.trim() || '', actor.fullName, nowIso, nowIso);
-
-    const insertLine = db.prepare(
-      `INSERT INTO purchase_order_items (id, purchase_order_id, item_id, ordered_qty_scaled, received_qty_scaled, unit_cost_paise)
-       VALUES (?, ?, ?, ?, 0, ?)`
-    );
-
+    let estimatedTotalPaise = 0;
+    const preparedLines: Array<{ itemId: string; qtyScaled: number; unitCostPaise: number }> = [];
     for (const line of input.items) {
       const item = db
         .prepare(`SELECT id, category FROM inventory_items WHERE id = ?`)
@@ -1448,7 +1504,39 @@ export function createPurchaseOrder(
       if (qtyScaled <= 0) {
         throw new HttpError(400, 'Ordered quantity must be greater than zero.');
       }
-      insertLine.run(uid('poi'), poId, item.id, qtyScaled, toPaise(line.unitCost ?? 0));
+      const unitCostPaise = toPaise(line.unitCost ?? 0);
+      estimatedTotalPaise += calcTaxablePaise(qtyScaled, unitCostPaise);
+      preparedLines.push({ itemId: item.id, qtyScaled, unitCostPaise });
+    }
+
+    const requiresOwnerApproval = estimatedTotalPaise > PURCHASE_OWNER_APPROVAL_LIMIT_PAISE;
+    const approvalStatus = requiresOwnerApproval ? 'PENDING_OWNER_APPROVAL' : 'NOT_REQUIRED';
+
+    db.prepare(
+      `INSERT INTO purchase_orders (
+        id, po_number, supplier_id, status, order_date, estimated_total_paise, approval_status,
+        notes, created_by, created_at, updated_at
+      ) VALUES (?, ?, ?, 'ORDERED', ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      poId,
+      poNumber,
+      sup.id,
+      nowIso.slice(0, 10),
+      estimatedTotalPaise,
+      approvalStatus,
+      input.notes?.trim() || '',
+      actor.fullName,
+      nowIso,
+      nowIso
+    );
+
+    const insertLine = db.prepare(
+      `INSERT INTO purchase_order_items (id, purchase_order_id, item_id, ordered_qty_scaled, received_qty_scaled, unit_cost_paise)
+       VALUES (?, ?, ?, ?, 0, ?)`
+    );
+
+    for (const line of preparedLines) {
+      insertLine.run(uid('poi'), poId, line.itemId, line.qtyScaled, line.unitCostPaise);
     }
 
     // Mark linked shortage queries as PROCUREMENT_REQUESTED (stock unchanged!)
@@ -1463,16 +1551,28 @@ export function createPurchaseOrder(
       }
     }
 
+    if (input.purchaseRequirementIds?.length) {
+      const nextReqStatus = requiresOwnerApproval ? 'AWAITING_OWNER_APPROVAL' : 'PO_PREPARED';
+      const updReq = db.prepare(
+        `UPDATE material_purchase_requirements
+         SET status = ?, purchase_order_id = ?, updated_at = ?
+         WHERE id = ? AND status IN ('SUBMITTED_TO_PROCUREMENT', 'PO_PREPARED')`
+      );
+      for (const reqId of input.purchaseRequirementIds) {
+        updReq.run(nextReqStatus, poId, nowIso, reqId);
+      }
+    }
+
     recordAuditLog(
       db,
       actor,
       'PURCHASE_ORDER',
       poId,
       'CREATE_PO',
-      `${poNumber} raised to ${sup.name} (no inventory change until receipt)`
+      `${poNumber} raised to ${sup.name} (${approvalStatus}; no inventory change until receipt)`
     );
 
-    return { id: poId, poNumber };
+    return { id: poId, poNumber, approvalStatus, estimatedTotal: fromPaise(estimatedTotalPaise) };
   });
 }
 
@@ -1565,6 +1665,29 @@ export function postPurchaseReceipt(
       }
     }
 
+    if (input.purchaseOrderId) {
+      const poRow = db
+        .prepare(`SELECT id, po_number, approval_status FROM purchase_orders WHERE id = ?`)
+        .get(input.purchaseOrderId) as
+        | { id: string; po_number: string; approval_status: string }
+        | undefined;
+      if (!poRow) {
+        throw new HttpError(404, `Purchase order ${input.purchaseOrderId} not found.`);
+      }
+      if (poRow.approval_status === 'PENDING_OWNER_APPROVAL') {
+        throw new HttpError(
+          400,
+          `Purchase order ${poRow.po_number} requires Owner approval before posting goods receipt.`
+        );
+      }
+      if (poRow.approval_status === 'REJECTED') {
+        throw new HttpError(
+          400,
+          `Purchase order ${poRow.po_number} was rejected and cannot receive goods.`
+        );
+      }
+    }
+
     const nowIso = new Date().toISOString();
     const receiptNumber = nextSequenceNumber(db, 'purchase_receipts', 'receipt_number', 'GRN-2026-');
     const receiptId = uid('grn');
@@ -1643,9 +1766,14 @@ export function postPurchaseReceipt(
         nowIso,
         input.purchaseOrderId
       );
+      db.prepare(
+        `UPDATE material_purchase_requirements
+         SET status = ?, updated_at = ?
+         WHERE purchase_order_id = ? AND status NOT IN ('RECEIVED', 'CANCELLED')`
+      ).run(allReceived ? 'RECEIVED' : 'PARTIALLY_RECEIVED', nowIso, input.purchaseOrderId);
     }
 
-    // Recalculate open shortage queries and advance AWAITING_MATERIALS production requests
+    // Recalculate open shortage queries and advance AWAITING_MATERIALS / MATERIAL_SHORTAGE production requests
     recalculateOpenShortageQueries(db, nowIso);
 
     recordAuditLog(
@@ -1665,7 +1793,7 @@ export function listProductionRuns(db: DatabaseSync) {
   const runs = db
     .prepare(
       `SELECT prun.*, preq.request_number, preq.order_id, o.order_number,
-              p.name AS product_name, p.sku AS product_sku, p.unit
+              p.name AS product_name, p.sku AS product_sku, p.unit, p.bom_version AS current_bom_version
        FROM production_runs prun
        JOIN production_requests preq ON preq.id = prun.production_request_id
        JOIN orders o ON o.id = preq.order_id
@@ -1683,15 +1811,25 @@ export function listProductionRuns(db: DatabaseSync) {
     product_name: string;
     product_sku: string;
     unit: string;
+    current_bom_version: string;
+    bom_version: string;
     planned_qty_scaled: number;
     actual_output_qty_scaled: number;
+    rejected_qty_scaled: number;
     wastage_qty_scaled: number;
+    damaged_packaging_qty_scaled: number;
     variance_qty_scaled: number;
+    yield_percent_bps: number;
+    quality_result: string;
     status: string;
     supervisor_user_id: string;
     supervisor_name: string;
+    created_by_name: string;
+    started_at: string;
+    completed_at: string;
     posted_at: string;
     notes: string;
+    variance_explanation: string;
   }>;
 
   const consStmt = db.prepare(
@@ -1699,6 +1837,15 @@ export function listProductionRuns(db: DatabaseSync) {
      FROM production_run_consumptions prc
      JOIN inventory_items ii ON ii.id = prc.material_id
      WHERE prc.production_run_id = ?`
+  );
+
+  const movStmt = db.prepare(
+    `SELECT sm.id, sm.movement_type, sm.direction, sm.quantity_scaled, sm.balance_after_scaled,
+            sm.reason, sm.created_at, sm.actor_name, ii.name AS item_name, ii.sku, ii.unit
+     FROM stock_movements sm
+     JOIN inventory_items ii ON ii.id = sm.item_id
+     WHERE sm.reference_type = 'PRODUCTION_RUN' AND sm.reference_id = ?
+     ORDER BY sm.created_at ASC`
   );
 
   return runs.map((r) => ({
@@ -1712,14 +1859,23 @@ export function listProductionRuns(db: DatabaseSync) {
     productName: r.product_name,
     productSku: r.product_sku,
     unit: r.unit,
+    bomVersion: r.bom_version || r.current_bom_version || 'v1.0',
     plannedQuantity: fromScaledQty(r.planned_qty_scaled),
     actualOutputQuantity: fromScaledQty(r.actual_output_qty_scaled),
+    rejectedQuantity: fromScaledQty(r.rejected_qty_scaled ?? 0),
     wastageQuantity: fromScaledQty(r.wastage_qty_scaled),
+    damagedPackagingQuantity: fromScaledQty(r.damaged_packaging_qty_scaled ?? 0),
     varianceQuantity: fromScaledQty(r.variance_qty_scaled),
+    yieldPercent: Number(((r.yield_percent_bps ?? 10000) / 100).toFixed(2)),
+    qualityResult: r.quality_result || 'PASSED',
     status: r.status,
     supervisorName: r.supervisor_name,
+    createdByName: r.created_by_name || r.supervisor_name,
+    startedAt: r.started_at || undefined,
+    completedAt: r.completed_at || r.posted_at,
     postedAt: r.posted_at,
     notes: r.notes || undefined,
+    varianceExplanation: r.variance_explanation || undefined,
     consumptions: (
       consStmt.all(r.id) as Array<{
         id: string;
@@ -1730,7 +1886,12 @@ export function listProductionRuns(db: DatabaseSync) {
         category: string;
         planned_qty_scaled: number;
         actual_consumed_qty_scaled: number;
+        additional_consumed_qty_scaled: number;
+        damaged_qty_scaled: number;
         wastage_qty_scaled: number;
+        variance_qty_scaled: number;
+        variance_percent_bps: number;
+        reason: string;
       }>
     ).map((c) => ({
       id: c.id,
@@ -1741,7 +1902,42 @@ export function listProductionRuns(db: DatabaseSync) {
       category: c.category,
       plannedQuantity: fromScaledQty(c.planned_qty_scaled),
       actualConsumedQuantity: fromScaledQty(c.actual_consumed_qty_scaled),
+      additionalConsumedQuantity: fromScaledQty(c.additional_consumed_qty_scaled ?? 0),
+      damagedQuantity: fromScaledQty(c.damaged_qty_scaled ?? 0),
       wastageQuantity: fromScaledQty(c.wastage_qty_scaled),
+      varianceQuantity: fromScaledQty(
+        c.variance_qty_scaled ??
+          c.actual_consumed_qty_scaled + (c.additional_consumed_qty_scaled ?? 0) - c.planned_qty_scaled
+      ),
+      variancePercent: Number(((c.variance_percent_bps ?? 0) / 100).toFixed(2)),
+      reason: c.reason || undefined,
+    })),
+    linkedMovements: (
+      movStmt.all(r.id) as Array<{
+        id: string;
+        movement_type: string;
+        direction: string;
+        quantity_scaled: number;
+        balance_after_scaled: number;
+        reason: string;
+        created_at: string;
+        actor_name: string;
+        item_name: string;
+        sku: string;
+        unit: string;
+      }>
+    ).map((m) => ({
+      id: m.id,
+      itemName: m.item_name,
+      sku: m.sku,
+      unit: m.unit,
+      movementType: m.movement_type,
+      direction: m.direction,
+      quantity: fromScaledQty(m.quantity_scaled),
+      balanceAfter: fromScaledQty(m.balance_after_scaled),
+      reason: m.reason,
+      actorName: m.actor_name,
+      createdAt: m.created_at,
     })),
   }));
 }
@@ -1753,7 +1949,12 @@ export function updateProductionRequestStatusBySupervisor(
   db: DatabaseSync,
   actor: AuthUser,
   requestId: string,
-  nextStatus: 'READY_FOR_PRODUCTION' | 'IN_PROGRESS' | 'CANCELLED',
+  nextStatus:
+    | 'PENDING_MATERIAL_CHECK'
+    | 'MATERIAL_SHORTAGE'
+    | 'READY_FOR_PRODUCTION'
+    | 'IN_PROGRESS'
+    | 'CANCELLED',
   notes?: string
 ) {
   requireRole(actor, ['PRODUCTION_SUPERVISOR']);
@@ -1773,12 +1974,14 @@ export function updateProductionRequestStatusBySupervisor(
     if (!pr) {
       throw new HttpError(404, `Production request ${requestId} not found.`);
     }
-    if (pr.status === 'COMPLETED' || pr.status === 'CANCELLED') {
+    if (pr.status === 'COMPLETED' || pr.status === 'PARTIALLY_COMPLETED' || pr.status === 'CANCELLED') {
       throw new HttpError(400, `Production request ${pr.request_number} is already ${pr.status}.`);
     }
 
     const nowIso = new Date().toISOString();
     const labelMap: Record<typeof nextStatus, string> = {
+      PENDING_MATERIAL_CHECK: 'Pending Material Check',
+      MATERIAL_SHORTAGE: 'Material Shortage',
       READY_FOR_PRODUCTION: 'Ready for Production',
       IN_PROGRESS: 'In Progress',
       CANCELLED: 'Cancelled by Supervisor',
@@ -1786,9 +1989,20 @@ export function updateProductionRequestStatusBySupervisor(
 
     db.prepare(
       `UPDATE production_requests
-       SET status = ?, assigned_supervisor_id = ?, supervisor_status = ?, notes = COALESCE(NULLIF(?, ''), notes), updated_at = ?
+       SET status = ?, assigned_supervisor_id = ?, supervisor_status = ?,
+           started_at = CASE WHEN ? = 'IN_PROGRESS' THEN COALESCE(NULLIF(started_at, ''), ?) ELSE started_at END,
+           notes = COALESCE(NULLIF(?, ''), notes), updated_at = ?
        WHERE id = ?`
-    ).run(nextStatus, actor.id, labelMap[nextStatus], notes?.trim() || '', nowIso, pr.id);
+    ).run(
+      nextStatus,
+      actor.id,
+      labelMap[nextStatus],
+      nextStatus,
+      nowIso,
+      notes?.trim() || '',
+      nowIso,
+      pr.id
+    );
 
     if (nextStatus === 'CANCELLED') {
       db.prepare(
@@ -1812,21 +2026,32 @@ export function updateProductionRequestStatusBySupervisor(
 
 /**
  * Production Supervisor ONLY: Post actual production run, deducting raw/packaging materials
- * and adding finished-goods stock atomically.
+ * and adding ONLY good finished-goods stock atomically.
  */
 export function postProductionRunBySupervisor(
   db: DatabaseSync,
   actor: AuthUser,
   input: {
     productionRequestId: string;
-    actualOutputQuantity: number;
+    actualOutputQuantity?: number;
+    goodOutputQuantity?: number;
+    rejectedQuantity?: number;
+    damagedPackagingQuantity?: number;
     wastageQuantity?: number;
+    qualityResult?: 'PASSED' | 'CONDITIONAL' | 'FAILED';
+    completionStatus?: 'COMPLETED' | 'PARTIALLY_COMPLETED';
+    startedAt?: string;
+    completedAt?: string;
     consumptions?: Array<{
       materialId: string;
       actualConsumedQuantity: number;
+      additionalConsumedQuantity?: number;
+      damagedQuantity?: number;
       wastageQuantity?: number;
+      reason?: string;
     }>;
     notes?: string;
+    varianceExplanation?: string;
     idempotencyKey?: string;
   }
 ) {
@@ -1852,13 +2077,14 @@ export function postProductionRunBySupervisor(
           product_id: string;
           requested_qty_scaled: number;
           status: string;
+          started_at: string;
         }
       | undefined;
 
     if (!pr) {
       throw new HttpError(404, `Production request ${input.productionRequestId} not found.`);
     }
-    if (pr.status === 'COMPLETED' || pr.status === 'CANCELLED') {
+    if (pr.status === 'COMPLETED' || pr.status === 'PARTIALLY_COMPLETED' || pr.status === 'CANCELLED') {
       throw new HttpError(400, `Cannot post production for ${pr.status} request.`);
     }
 
@@ -1872,32 +2098,67 @@ export function postProductionRunBySupervisor(
       );
     }
 
-    const actualOutputScaled = toScaledQty(input.actualOutputQuantity);
+    const prodRow = db
+      .prepare(`SELECT name, bom_version FROM inventory_items WHERE id = ?`)
+      .get(pr.product_id) as { name: string; bom_version: string } | undefined;
+
+    const goodOutputValue = input.goodOutputQuantity ?? input.actualOutputQuantity ?? 0;
+    if (goodOutputValue < 0 || (input.rejectedQuantity ?? 0) < 0 || (input.wastageQuantity ?? 0) < 0) {
+      throw new HttpError(400, 'Output, rejected, and wastage quantities cannot be negative.');
+    }
+    const actualOutputScaled = toScaledQty(goodOutputValue);
+    const rejectedScaled = toScaledQty(input.rejectedQuantity ?? 0);
     const wastageScaled = toScaledQty(input.wastageQuantity ?? 0);
+    const damagedPkgScaled = toScaledQty(input.damagedPackagingQuantity ?? 0);
     const varianceScaled = actualOutputScaled - pr.requested_qty_scaled;
+    const totalProducedAttempt = actualOutputScaled + rejectedScaled;
+    const yieldPercentBps =
+      pr.requested_qty_scaled > 0
+        ? Math.round((actualOutputScaled / pr.requested_qty_scaled) * 10000)
+        : totalProducedAttempt > 0
+          ? Math.round((actualOutputScaled / totalProducedAttempt) * 10000)
+          : 10000;
+
     const nowIso = new Date().toISOString();
     const runNumber = nextSequenceNumber(db, 'production_runs', 'run_number', 'RUN-2026-');
     const runId = uid('run');
+    const finalStatus =
+      input.completionStatus === 'PARTIALLY_COMPLETED' ? 'PARTIALLY_COMPLETED' : 'COMPLETED';
+    const qualityResult = input.qualityResult || (rejectedScaled > 0 ? 'CONDITIONAL' : 'PASSED');
+    const startedAt = input.startedAt?.trim() || pr.started_at || nowIso;
+    const completedAt = input.completedAt?.trim() || nowIso;
 
     db.prepare(
       `INSERT INTO production_runs (
-        id, run_number, production_request_id, product_id,
-        planned_qty_scaled, actual_output_qty_scaled, wastage_qty_scaled, variance_qty_scaled,
-        status, supervisor_user_id, supervisor_name, posted_at, notes, idempotency_key
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'POSTED', ?, ?, ?, ?, ?)`
+        id, run_number, production_request_id, product_id, bom_version,
+        planned_qty_scaled, actual_output_qty_scaled, rejected_qty_scaled,
+        wastage_qty_scaled, damaged_packaging_qty_scaled, variance_qty_scaled,
+        yield_percent_bps, quality_result, status, supervisor_user_id, supervisor_name,
+        created_by_name, started_at, completed_at, posted_at, notes, variance_explanation, idempotency_key
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       runId,
       runNumber,
       pr.id,
       pr.product_id,
+      prodRow?.bom_version || 'v1.0',
       pr.requested_qty_scaled,
       actualOutputScaled,
+      rejectedScaled,
       wastageScaled,
+      damagedPkgScaled,
       varianceScaled,
+      yieldPercentBps,
+      qualityResult,
+      finalStatus === 'PARTIALLY_COMPLETED' ? 'PARTIALLY_COMPLETED' : 'POSTED',
       actor.id,
       actor.fullName,
+      actor.fullName,
+      startedAt,
+      completedAt,
       nowIso,
       input.notes?.trim() || '',
+      input.varianceExplanation?.trim() || '',
       input.idempotencyKey || null
     );
 
@@ -1916,8 +2177,10 @@ export function postProductionRunBySupervisor(
 
     const insertCons = db.prepare(
       `INSERT INTO production_run_consumptions (
-        id, production_run_id, material_id, planned_qty_scaled, actual_consumed_qty_scaled, wastage_qty_scaled
-      ) VALUES (?, ?, ?, ?, ?, ?)`
+        id, production_run_id, material_id, planned_qty_scaled,
+        actual_consumed_qty_scaled, additional_consumed_qty_scaled,
+        damaged_qty_scaled, wastage_qty_scaled, variance_qty_scaled, variance_percent_bps, reason
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
 
     for (const bom of bomRows) {
@@ -1925,30 +2188,44 @@ export function postProductionRunBySupervisor(
         (pr.requested_qty_scaled * bom.quantity_per_unit_scaled) / 10000
       );
       const override = overrideMap.get(bom.material_id);
-      const actualConsScaled = override
+      const baseActualScaled = override
         ? toScaledQty(override.actualConsumedQuantity)
         : plannedScaled;
+      const additionalScaled = override ? toScaledQty(override.additionalConsumedQuantity ?? 0) : 0;
+      const damagedScaled = override ? toScaledQty(override.damagedQuantity ?? 0) : 0;
       const matWastageScaled = override ? toScaledQty(override.wastageQuantity ?? 0) : 0;
+      if (baseActualScaled < 0 || additionalScaled < 0 || damagedScaled < 0 || matWastageScaled < 0) {
+        throw new HttpError(400, 'Material consumption and damage quantities cannot be negative.');
+      }
+      const totalConsumedScaled = baseActualScaled + additionalScaled;
+      const matVarianceScaled = totalConsumedScaled - plannedScaled;
+      const matVariancePctBps =
+        plannedScaled > 0 ? Math.round((matVarianceScaled / plannedScaled) * 10000) : 0;
 
       insertCons.run(
         uid('rc'),
         runId,
         bom.material_id,
         plannedScaled,
-        actualConsScaled,
-        matWastageScaled
+        baseActualScaled,
+        additionalScaled,
+        damagedScaled,
+        matWastageScaled,
+        matVarianceScaled,
+        matVariancePctBps,
+        override?.reason?.trim() || ''
       );
 
-      if (actualConsScaled > 0) {
+      if (totalConsumedScaled > 0) {
         applyStockMovement(db, {
           itemId: bom.material_id,
           movementType: 'PRODUCTION_CONSUMPTION',
           direction: 'OUT',
-          qtyScaled: actualConsScaled,
+          qtyScaled: totalConsumedScaled,
           referenceType: 'PRODUCTION_RUN',
           referenceId: runId,
           referenceNumber: runNumber,
-          reason: `Consumed in ${runNumber} (${pr.request_number})`,
+          reason: `Consumed in ${runNumber} (${pr.request_number})${override?.reason ? `: ${override.reason}` : ''}`,
           actor,
           nowIso,
         });
@@ -1964,7 +2241,7 @@ export function postProductionRunBySupervisor(
         referenceType: 'PRODUCTION_RUN',
         referenceId: runId,
         referenceNumber: runNumber,
-        reason: `Finished goods output posted from ${runNumber}`,
+        reason: `Good finished goods posted from ${runNumber}${rejectedScaled > 0 ? ` (${fromScaledQty(rejectedScaled)} rejected excluded)` : ''}`,
         actor,
         nowIso,
       });
@@ -1972,9 +2249,17 @@ export function postProductionRunBySupervisor(
 
     db.prepare(
       `UPDATE production_requests
-       SET status = 'COMPLETED', assigned_supervisor_id = ?, supervisor_status = 'Completed & Posted', updated_at = ?
+       SET status = ?, assigned_supervisor_id = ?, supervisor_status = ?, updated_at = ?
        WHERE id = ?`
-    ).run(actor.id, nowIso, pr.id);
+    ).run(
+      finalStatus,
+      actor.id,
+      finalStatus === 'PARTIALLY_COMPLETED' ? 'Partially Completed' : 'Completed & Posted',
+      nowIso,
+      pr.id
+    );
+
+    db.prepare(`DELETE FROM production_run_drafts WHERE production_request_id = ?`).run(pr.id);
 
     db.prepare(
       `UPDATE material_shortage_queries SET status = 'RESOLVED', updated_at = ?
@@ -1987,10 +2272,19 @@ export function postProductionRunBySupervisor(
       'PRODUCTION_RUN',
       runId,
       'POST_PRODUCTION_RUN',
-      `${runNumber} posted: output ${fromScaledQty(actualOutputScaled)} (planned ${fromScaledQty(pr.requested_qty_scaled)})`
+      `${runNumber} posted: good output ${fromScaledQty(actualOutputScaled)} (planned ${fromScaledQty(pr.requested_qty_scaled)}, rejected ${fromScaledQty(rejectedScaled)}, yield ${(yieldPercentBps / 100).toFixed(1)}%)`
     );
 
-    return { id: runId, runNumber, deduplicated: false };
+    recordAuditLog(
+      db,
+      actor,
+      'ORDER',
+      pr.order_id,
+      'FINISHED_STOCK_AVAILABLE',
+      `${prodRow?.name || pr.product_id}: ${fromScaledQty(actualOutputScaled)} units posted by ${actor.fullName} (${runNumber}) — ready for Admin order review & dispatch`
+    );
+
+    return { id: runId, runNumber, deduplicated: false, status: finalStatus };
   });
 }
 
@@ -2779,21 +3073,44 @@ export function upsertProductAndBom(
     const productId = input.id || uid('prod');
     const isEdit = Boolean(input.id);
     let previousImageUrl = '';
+    let nextBomVersion = 'v1.0';
 
     if (isEdit) {
       const existing = db
         .prepare(
-          `SELECT id, image_url FROM inventory_items WHERE id = ? AND category = 'FINISHED_GOOD'`
+          `SELECT id, image_url, bom_version FROM inventory_items WHERE id = ? AND category = 'FINISHED_GOOD'`
         )
-        .get(productId) as { id: string; image_url: string } | undefined;
+        .get(productId) as { id: string; image_url: string; bom_version: string } | undefined;
       if (!existing) {
         throw new HttpError(404, `Product ${productId} not found.`);
       }
       previousImageUrl = existing.image_url || '';
+
+      const existingBom = db
+        .prepare(`SELECT material_id, quantity_per_unit_scaled FROM bom_items WHERE product_id = ? ORDER BY material_id`)
+        .all(productId) as Array<{ material_id: string; quantity_per_unit_scaled: number }>;
+      const nextBomComparable = (input.bomItems ?? [])
+        .map((b) => `${b.materialId}:${toScaledQty(b.quantityPerUnit)}`)
+        .sort()
+        .join('|');
+      const prevBomComparable = existingBom
+        .map((b) => `${b.material_id}:${b.quantity_per_unit_scaled}`)
+        .sort()
+        .join('|');
+      nextBomVersion = existing.bom_version || 'v1.0';
+      if (nextBomComparable !== prevBomComparable) {
+        const match = /^v(\d+)\.(\d+)$/.exec(nextBomVersion);
+        if (match) {
+          nextBomVersion = `v${match[1]}.${Number(match[2]) + 1}`;
+        } else {
+          nextBomVersion = `${nextBomVersion}.1`;
+        }
+      }
+
       db.prepare(
         `UPDATE inventory_items
          SET sku = ?, name = ?, pack_size = ?, selling_price_paise = ?, gst_rate_bps = ?,
-             hsn_code = ?, image_url = ?, unit = ?, reorder_level_scaled = ?, is_active = ?, updated_at = ?
+             hsn_code = ?, image_url = ?, unit = ?, reorder_level_scaled = ?, bom_version = ?, is_active = ?, updated_at = ?
          WHERE id = ?`
       ).run(
         input.sku.trim(),
@@ -2805,6 +3122,7 @@ export function upsertProductAndBom(
         normalizedImageUrl,
         input.unit.trim(),
         toScaledQty(input.reorderLevel),
+        nextBomVersion,
         input.isActive === false ? 0 : 1,
         nowIso,
         productId

@@ -46,9 +46,17 @@ const PRODUCTION_STATUS_STYLES: Record<
     label: 'Pending Supervisor Review',
     className: 'bg-amber-50 text-amber-800 border-amber-200',
   },
+  PENDING_MATERIAL_CHECK: {
+    label: 'Pending Material Check',
+    className: 'bg-amber-50 text-amber-800 border-amber-200',
+  },
   AWAITING_MATERIALS: {
     label: 'Awaiting Materials',
     className: 'bg-orange-50 text-orange-800 border-orange-200',
+  },
+  MATERIAL_SHORTAGE: {
+    label: 'Material Shortage',
+    className: 'bg-rose-50 text-rose-700 border-rose-200',
   },
   READY_FOR_PRODUCTION: {
     label: 'Ready for Production',
@@ -61,6 +69,10 @@ const PRODUCTION_STATUS_STYLES: Record<
   COMPLETED: {
     label: 'Completed',
     className: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  },
+  PARTIALLY_COMPLETED: {
+    label: 'Partially Completed',
+    className: 'bg-teal-50 text-teal-700 border-teal-200',
   },
   CANCELLED: {
     label: 'Cancelled',
@@ -94,15 +106,30 @@ export function ToneBadge({
   tone,
   children,
 }: {
-  tone: 'neutral' | 'success' | 'warning' | 'danger' | 'navy';
+  tone:
+    | 'neutral'
+    | 'success'
+    | 'warning'
+    | 'danger'
+    | 'navy'
+    | 'slate'
+    | 'green'
+    | 'amber'
+    | 'red'
+    | 'blue';
   children: React.ReactNode;
 }) {
   const styles: Record<typeof tone, string> = {
     neutral: 'bg-slate-100 text-slate-700 border-slate-200',
+    slate: 'bg-slate-100 text-slate-700 border-slate-200',
     success: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    green: 'bg-emerald-50 text-emerald-700 border-emerald-200',
     warning: 'bg-amber-50 text-amber-800 border-amber-200',
+    amber: 'bg-amber-50 text-amber-800 border-amber-200',
     danger: 'bg-rose-50 text-rose-700 border-rose-200',
+    red: 'bg-rose-50 text-rose-700 border-rose-200',
     navy: 'bg-blue-50 text-blue-900 border-blue-200',
+    blue: 'bg-blue-50 text-blue-900 border-blue-200',
   };
 
   return (

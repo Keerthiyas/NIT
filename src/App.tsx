@@ -231,7 +231,10 @@ export function App() {
           )}
 
           {activeSection === 'production-stock' && (
-            <ProductionStockView onDataChanged={() => void refreshWorkspace()} />
+            <ProductionStockView
+              currentUser={currentUser}
+              onDataChanged={() => void refreshWorkspace()}
+            />
           )}
 
           {activeSection === 'billing-payments' && <BillingPaymentsView />}

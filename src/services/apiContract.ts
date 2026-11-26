@@ -141,4 +141,46 @@ export const REQUIRED_BACKEND_APIS: ApiEndpointSpec[] = [
     purpose: 'Salesman only: submit single or multi-product order without stock-availability blocking.',
     implemented: true,
   },
+  {
+    method: 'GET',
+    path: '/api/supervisor/dashboard',
+    purpose: 'Production Supervisor only: metrics, shortage alerts, and recent production activity.',
+    implemented: true,
+  },
+  {
+    method: 'POST',
+    path: '/api/supervisor/production-requests/:id/check-availability',
+    purpose: 'Production Supervisor only: check BOM material stock availability against request.',
+    implemented: true,
+  },
+  {
+    method: 'POST',
+    path: '/api/purchase-requirements',
+    purpose: 'Production Supervisor only: raise material purchase requirement for procurement review.',
+    implemented: true,
+  },
+  {
+    method: 'POST',
+    path: '/api/purchase-orders/:id/approve',
+    purpose: 'Owner/Super Admin only: approve or reject high-value Purchase Orders.',
+    implemented: true,
+  },
+  {
+    method: 'POST',
+    path: '/api/stock-discrepancies',
+    purpose: 'Production Supervisor only: report physical vs system stock variance without modifying balance.',
+    implemented: true,
+  },
+  {
+    method: 'POST',
+    path: '/api/stock-discrepancies/:id/review',
+    purpose: 'Admin/Owner only: approve or reject discrepancy adjustment with ledger movement.',
+    implemented: true,
+  },
+  {
+    method: 'POST',
+    path: '/api/bom-revisions',
+    purpose: 'Production Supervisor only: submit BOM adjustment suggestion to Admin for review.',
+    implemented: true,
+  },
 ];

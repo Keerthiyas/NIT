@@ -1,12 +1,14 @@
 import type {
   AuthUser,
   BillingWorkspaceData,
+  BomRevisionRequest,
   CatalogueProduct,
   Customer,
   DashboardSummary,
   DispatchRecord,
   InventoryItem,
   ManagedUser,
+  MaterialPurchaseRequirement,
   MaterialShortageQuery,
   Order,
   OrderDecisionPayload,
@@ -14,13 +16,16 @@ import type {
   Product,
   ProductionRequest,
   ProductionRun,
+  ProductionRunDraftPayload,
   PurchaseOrder,
   PurchaseReceipt,
   SalesmanCustomer,
   SalesmanDashboardData,
   SalesmanOrder,
   SalesmanProduct,
+  StockDiscrepancyReport,
   StockMovement,
+  SupervisorDashboardData,
   Supplier,
   UserRole,
 } from '../types/orderAudit';
@@ -178,11 +183,23 @@ export const orderAuditService = {
     supplierId: string;
     items: Array<{ itemId: string; orderedQuantity: number; unitCost?: number }>;
     shortageQueryIds?: string[];
+    purchaseRequirementIds?: string[];
     notes?: string;
-  }): Promise<{ id: string; poNumber: string }> {
+  }): Promise<{ id: string; poNumber: string; approvalStatus?: string }> {
     return fetchJson('/api/purchase-orders', {
       method: 'POST',
       body: JSON.stringify(payload),
+    });
+  },
+
+  async approvePurchaseOrderByOwner(
+    poId: string,
+    approve: boolean,
+    note?: string
+  ): Promise<{ id: string; poNumber: string; approvalStatus: string }> {
+    return fetchJson(`/api/purchase-orders/${encodeURIComponent(poId)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ approve, note }),
     });
   },
 
@@ -209,7 +226,12 @@ export const orderAuditService = {
 
   async updateProductionRequestStatus(
     requestId: string,
-    status: 'READY_FOR_PRODUCTION' | 'IN_PROGRESS' | 'CANCELLED',
+    status:
+      | 'PENDING_MATERIAL_CHECK'
+      | 'MATERIAL_SHORTAGE'
+      | 'READY_FOR_PRODUCTION'
+      | 'IN_PROGRESS'
+      | 'CANCELLED',
     notes?: string
   ): Promise<{ id: string; status: string }> {
     return fetchJson(`/api/production-requests/${encodeURIComponent(requestId)}/status`, {
@@ -220,20 +242,163 @@ export const orderAuditService = {
 
   async postProductionRun(payload: {
     productionRequestId: string;
-    actualOutputQuantity: number;
+    actualOutputQuantity?: number;
+    goodOutputQuantity?: number;
+    rejectedQuantity?: number;
+    damagedPackagingQuantity?: number;
     wastageQuantity?: number;
+    qualityResult?: 'PASSED' | 'CONDITIONAL' | 'FAILED';
+    completionStatus?: 'COMPLETED' | 'PARTIALLY_COMPLETED';
     consumptions?: Array<{
       materialId: string;
       actualConsumedQuantity: number;
+      additionalConsumedQuantity?: number;
+      damagedQuantity?: number;
       wastageQuantity?: number;
+      reason?: string;
     }>;
     notes?: string;
+    varianceExplanation?: string;
     idempotencyKey?: string;
-  }): Promise<{ id: string; runNumber: string }> {
+  }): Promise<{ id: string; runNumber: string; status?: string }> {
     return fetchJson('/api/production-runs', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  // --- Production Supervisor & Material/BOM Review Workflows ---
+  async loadSupervisorDashboard(): Promise<SupervisorDashboardData> {
+    return fetchJson<SupervisorDashboardData>('/api/supervisor/dashboard');
+  },
+
+  async checkProductionRequestAvailability(requestId: string): Promise<{
+    productionRequestId: string;
+    requestNumber: string;
+    bomVersion: string;
+    rawMaterialAvailability: 'SUFFICIENT' | 'INSUFFICIENT';
+    nextStatus: string;
+    bomBreakdown: Array<{
+      materialId: string;
+      materialCode: string;
+      materialName: string;
+      category: string;
+      unit: string;
+      quantityPerUnit: number;
+      requiredQuantity: number;
+      availableStock: number;
+      shortfallQuantity: number;
+      isSufficient: boolean;
+    }>;
+  }> {
+    return fetchJson(
+      `/api/supervisor/production-requests/${encodeURIComponent(requestId)}/check-availability`,
+      { method: 'POST' }
+    );
+  },
+
+  async listMaterialPurchaseRequirements(): Promise<MaterialPurchaseRequirement[]> {
+    return fetchJson<MaterialPurchaseRequirement[]>('/api/purchase-requirements');
+  },
+
+  async createMaterialPurchaseRequirement(payload: {
+    productionRequestId: string;
+    materialId: string;
+    requiredQuantity?: number;
+    shortageQuantity?: number;
+    priority?: 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT';
+    reason?: string;
+  }): Promise<{ id: string; requirementNumber: string }> {
+    return fetchJson('/api/purchase-requirements', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async listStockDiscrepancies(): Promise<StockDiscrepancyReport[]> {
+    return fetchJson<StockDiscrepancyReport[]>('/api/stock-discrepancies');
+  },
+
+  async createStockDiscrepancy(payload: {
+    itemId: string;
+    physicalQuantity: number;
+    reason: string;
+  }): Promise<{ id: string; reportNumber: string; differenceQuantity: number }> {
+    return fetchJson('/api/stock-discrepancies', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async reviewStockDiscrepancy(
+    reportId: string,
+    decision: 'APPROVE' | 'REJECT',
+    note?: string
+  ): Promise<{ id: string; reportNumber: string; status: string }> {
+    return fetchJson(`/api/stock-discrepancies/${encodeURIComponent(reportId)}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ decision, note }),
+    });
+  },
+
+  async listBomRevisionRequests(): Promise<BomRevisionRequest[]> {
+    return fetchJson<BomRevisionRequest[]>('/api/bom-revisions');
+  },
+
+  async createBomRevisionRequest(payload: {
+    productId: string;
+    materialId: string;
+    suggestedQuantityPerUnit: number;
+    productionRunId?: string;
+    reason: string;
+  }): Promise<{ id: string; requestNumber: string }> {
+    return fetchJson('/api/bom-revisions', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async reviewBomRevisionRequest(
+    revisionId: string,
+    decision: 'APPROVE' | 'REJECT',
+    note?: string
+  ): Promise<{ id: string; requestNumber: string; status: string; bomVersion: string }> {
+    return fetchJson(`/api/bom-revisions/${encodeURIComponent(revisionId)}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ decision, note }),
+    });
+  },
+
+  async getProductionRunDraft(requestId: string): Promise<ProductionRunDraftPayload | null> {
+    return fetchJson<ProductionRunDraftPayload | null>(
+      `/api/supervisor/production-runs/draft/${encodeURIComponent(requestId)}`
+    );
+  },
+
+  async saveProductionRunDraft(
+    requestId: string,
+    payload: ProductionRunDraftPayload['payload']
+  ): Promise<{ productionRequestId: string; updatedAt: string }> {
+    return fetchJson(
+      `/api/supervisor/production-runs/draft/${encodeURIComponent(requestId)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  async updateRunVarianceExplanation(
+    runId: string,
+    varianceExplanation: string
+  ): Promise<{ id: string; varianceExplanation: string }> {
+    return fetchJson(
+      `/api/supervisor/production-runs/${encodeURIComponent(runId)}/explanation`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ varianceExplanation }),
+      }
+    );
   },
 
   // --- Dispatches, Billing & Payments ---

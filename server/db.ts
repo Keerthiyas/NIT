@@ -99,6 +99,7 @@ export function initializeSchema(db: DatabaseSync): void {
       gst_rate_bps INTEGER NOT NULL DEFAULT 0 CHECK(gst_rate_bps >= 0),
       hsn_code TEXT NOT NULL DEFAULT '',
       image_url TEXT NOT NULL DEFAULT '',
+      bom_version TEXT NOT NULL DEFAULT 'v1.0',
       reorder_level_scaled INTEGER NOT NULL DEFAULT 0 CHECK(reorder_level_scaled >= 0),
       is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
       created_at TEXT NOT NULL,
@@ -119,7 +120,8 @@ export function initializeSchema(db: DatabaseSync): void {
         'PURCHASE_RECEIPT',
         'PRODUCTION_CONSUMPTION',
         'PRODUCTION_OUTPUT',
-        'DISPATCH'
+        'DISPATCH',
+        'DISCREPANCY_ADJUSTMENT'
       )),
       direction TEXT NOT NULL CHECK(direction IN ('IN', 'OUT')),
       quantity_scaled INTEGER NOT NULL CHECK(quantity_scaled > 0),
@@ -209,12 +211,18 @@ export function initializeSchema(db: DatabaseSync): void {
       requested_qty_scaled INTEGER NOT NULL CHECK(requested_qty_scaled > 0),
       status TEXT NOT NULL CHECK(status IN (
         'PENDING_SUPERVISOR_REVIEW',
+        'PENDING_MATERIAL_CHECK',
         'AWAITING_MATERIALS',
+        'MATERIAL_SHORTAGE',
         'READY_FOR_PRODUCTION',
         'IN_PROGRESS',
         'COMPLETED',
+        'PARTIALLY_COMPLETED',
         'CANCELLED'
       )),
+      priority TEXT NOT NULL DEFAULT 'NORMAL' CHECK(priority IN ('LOW', 'NORMAL', 'HIGH', 'URGENT')),
+      reason TEXT NOT NULL DEFAULT 'Customer Order Shortage',
+      started_at TEXT NOT NULL DEFAULT '',
       assigned_supervisor_id TEXT REFERENCES users(id),
       supervisor_status TEXT NOT NULL DEFAULT 'Unassigned',
       created_at TEXT NOT NULL,
@@ -249,6 +257,10 @@ export function initializeSchema(db: DatabaseSync): void {
       supplier_id TEXT NOT NULL REFERENCES suppliers(id),
       status TEXT NOT NULL CHECK(status IN ('ORDERED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED')),
       order_date TEXT NOT NULL,
+      estimated_total_paise INTEGER NOT NULL DEFAULT 0 CHECK(estimated_total_paise >= 0),
+      approval_status TEXT NOT NULL DEFAULT 'NOT_REQUIRED' CHECK(approval_status IN ('NOT_REQUIRED', 'PENDING_OWNER_APPROVAL', 'APPROVED', 'REJECTED')),
+      approved_by TEXT NOT NULL DEFAULT '',
+      approved_at TEXT NOT NULL DEFAULT '',
       notes TEXT NOT NULL DEFAULT '',
       created_by TEXT NOT NULL,
       created_at TEXT NOT NULL,
@@ -289,15 +301,24 @@ export function initializeSchema(db: DatabaseSync): void {
       run_number TEXT NOT NULL UNIQUE,
       production_request_id TEXT NOT NULL UNIQUE REFERENCES production_requests(id),
       product_id TEXT NOT NULL REFERENCES inventory_items(id),
+      bom_version TEXT NOT NULL DEFAULT 'v1.0',
       planned_qty_scaled INTEGER NOT NULL CHECK(planned_qty_scaled > 0),
       actual_output_qty_scaled INTEGER NOT NULL CHECK(actual_output_qty_scaled >= 0),
+      rejected_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(rejected_qty_scaled >= 0),
+      damaged_packaging_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(damaged_packaging_qty_scaled >= 0),
       wastage_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(wastage_qty_scaled >= 0),
       variance_qty_scaled INTEGER NOT NULL,
-      status TEXT NOT NULL CHECK(status IN ('POSTED')),
+      yield_percent_bps INTEGER NOT NULL DEFAULT 10000,
+      quality_result TEXT NOT NULL DEFAULT 'PASSED' CHECK(quality_result IN ('PASSED', 'CONDITIONAL', 'FAILED')),
+      status TEXT NOT NULL CHECK(status IN ('POSTED', 'PARTIALLY_COMPLETED')),
       supervisor_user_id TEXT NOT NULL REFERENCES users(id),
       supervisor_name TEXT NOT NULL,
+      created_by_name TEXT NOT NULL DEFAULT '',
+      started_at TEXT NOT NULL DEFAULT '',
+      completed_at TEXT NOT NULL DEFAULT '',
       posted_at TEXT NOT NULL,
       notes TEXT NOT NULL DEFAULT '',
+      variance_explanation TEXT NOT NULL DEFAULT '',
       idempotency_key TEXT UNIQUE
     );
 
@@ -307,7 +328,83 @@ export function initializeSchema(db: DatabaseSync): void {
       material_id TEXT NOT NULL REFERENCES inventory_items(id),
       planned_qty_scaled INTEGER NOT NULL CHECK(planned_qty_scaled >= 0),
       actual_consumed_qty_scaled INTEGER NOT NULL CHECK(actual_consumed_qty_scaled >= 0),
-      wastage_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(wastage_qty_scaled >= 0)
+      additional_consumed_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(additional_consumed_qty_scaled >= 0),
+      damaged_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(damaged_qty_scaled >= 0),
+      wastage_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(wastage_qty_scaled >= 0),
+      variance_qty_scaled INTEGER NOT NULL DEFAULT 0,
+      variance_percent_bps INTEGER NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS production_run_drafts (
+      production_request_id TEXT PRIMARY KEY REFERENCES production_requests(id) ON DELETE CASCADE,
+      payload_json TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      updated_by_name TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS stock_discrepancy_reports (
+      id TEXT PRIMARY KEY,
+      report_number TEXT NOT NULL UNIQUE,
+      item_id TEXT NOT NULL REFERENCES inventory_items(id),
+      system_qty_scaled INTEGER NOT NULL CHECK(system_qty_scaled >= 0),
+      physical_qty_scaled INTEGER NOT NULL CHECK(physical_qty_scaled >= 0),
+      difference_scaled INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('OPEN', 'APPROVED', 'REJECTED')),
+      reported_by_user_id TEXT NOT NULL REFERENCES users(id),
+      reported_by_name TEXT NOT NULL,
+      reviewed_by_user_id TEXT REFERENCES users(id),
+      reviewed_by_name TEXT NOT NULL DEFAULT '',
+      review_note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      reviewed_at TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS bom_revision_requests (
+      id TEXT PRIMARY KEY,
+      request_number TEXT NOT NULL UNIQUE,
+      product_id TEXT NOT NULL REFERENCES inventory_items(id),
+      bom_version TEXT NOT NULL,
+      material_id TEXT NOT NULL REFERENCES inventory_items(id),
+      current_qty_per_unit_scaled INTEGER NOT NULL CHECK(current_qty_per_unit_scaled > 0),
+      suggested_qty_per_unit_scaled INTEGER NOT NULL CHECK(suggested_qty_per_unit_scaled > 0),
+      production_run_id TEXT REFERENCES production_runs(id),
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('PENDING_ADMIN_REVIEW', 'APPROVED', 'REJECTED')),
+      requested_by_user_id TEXT NOT NULL REFERENCES users(id),
+      requested_by_name TEXT NOT NULL,
+      reviewed_by_name TEXT NOT NULL DEFAULT '',
+      review_note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      reviewed_at TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS material_purchase_requirements (
+      id TEXT PRIMARY KEY,
+      requirement_number TEXT NOT NULL UNIQUE,
+      material_id TEXT NOT NULL REFERENCES inventory_items(id),
+      production_request_id TEXT NOT NULL REFERENCES production_requests(id),
+      required_qty_scaled INTEGER NOT NULL CHECK(required_qty_scaled > 0),
+      available_qty_scaled INTEGER NOT NULL CHECK(available_qty_scaled >= 0),
+      shortage_qty_scaled INTEGER NOT NULL CHECK(shortage_qty_scaled >= 0),
+      priority TEXT NOT NULL DEFAULT 'NORMAL' CHECK(priority IN ('LOW', 'NORMAL', 'HIGH', 'URGENT')),
+      reason TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL CHECK(status IN (
+        'SUBMITTED_TO_PROCUREMENT',
+        'PO_PREPARED',
+        'AWAITING_OWNER_APPROVAL',
+        'APPROVED_FOR_PURCHASE',
+        'PARTIALLY_RECEIVED',
+        'RECEIVED',
+        'CANCELLED'
+      )),
+      purchase_order_id TEXT REFERENCES purchase_orders(id),
+      requested_by_user_id TEXT NOT NULL REFERENCES users(id),
+      requested_by_name TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS dispatches (
@@ -389,12 +486,178 @@ export function initializeSchema(db: DatabaseSync): void {
     );
   `);
 
-  // Safe migration for existing databases adding product image_url
+  // Safe migration for existing databases adding product image_url & bom_version
   const itemColumns = db
     .prepare(`PRAGMA table_info(inventory_items)`)
     .all() as Array<{ name: string }>;
   if (!itemColumns.some((c) => c.name === 'image_url')) {
     db.exec(`ALTER TABLE inventory_items ADD COLUMN image_url TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!itemColumns.some((c) => c.name === 'bom_version')) {
+    db.exec(`ALTER TABLE inventory_items ADD COLUMN bom_version TEXT NOT NULL DEFAULT 'v1.0'`);
+  }
+
+  // Safe migration for stock_movements CHECK constraint to include DISCREPANCY_ADJUSTMENT
+  const movTableDef = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'stock_movements'`)
+    .get() as { sql: string } | undefined;
+  if (movTableDef && !movTableDef.sql.includes('DISCREPANCY_ADJUSTMENT')) {
+    db.exec(`PRAGMA foreign_keys = OFF;`);
+    db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE stock_movements_migrated (
+        id TEXT PRIMARY KEY,
+        item_id TEXT NOT NULL REFERENCES inventory_items(id),
+        movement_type TEXT NOT NULL CHECK(movement_type IN (
+          'OPENING_BALANCE',
+          'PURCHASE_RECEIPT',
+          'PRODUCTION_CONSUMPTION',
+          'PRODUCTION_OUTPUT',
+          'DISPATCH',
+          'DISCREPANCY_ADJUSTMENT'
+        )),
+        direction TEXT NOT NULL CHECK(direction IN ('IN', 'OUT')),
+        quantity_scaled INTEGER NOT NULL CHECK(quantity_scaled > 0),
+        balance_after_scaled INTEGER NOT NULL CHECK(balance_after_scaled >= 0),
+        reference_type TEXT NOT NULL,
+        reference_id TEXT NOT NULL,
+        reference_number TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        actor_user_id TEXT NOT NULL,
+        actor_name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(reference_type, reference_id, item_id, direction)
+      );
+      INSERT INTO stock_movements_migrated SELECT * FROM stock_movements;
+      DROP TABLE stock_movements;
+      ALTER TABLE stock_movements_migrated RENAME TO stock_movements;
+      COMMIT;
+    `);
+    db.exec(`PRAGMA foreign_keys = ON;`);
+  }
+
+  // Safe migration for production_requests CHECK + priority/reason/started_at columns
+  const prTableDef = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'production_requests'`)
+    .get() as { sql: string } | undefined;
+  if (prTableDef && !prTableDef.sql.includes('MATERIAL_SHORTAGE')) {
+    db.exec(`PRAGMA foreign_keys = OFF;`);
+    db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE production_requests_migrated (
+        id TEXT PRIMARY KEY,
+        request_number TEXT NOT NULL UNIQUE,
+        order_id TEXT NOT NULL REFERENCES orders(id),
+        product_id TEXT NOT NULL REFERENCES inventory_items(id),
+        requested_qty_scaled INTEGER NOT NULL CHECK(requested_qty_scaled > 0),
+        status TEXT NOT NULL CHECK(status IN (
+          'PENDING_SUPERVISOR_REVIEW',
+          'PENDING_MATERIAL_CHECK',
+          'AWAITING_MATERIALS',
+          'MATERIAL_SHORTAGE',
+          'READY_FOR_PRODUCTION',
+          'IN_PROGRESS',
+          'COMPLETED',
+          'PARTIALLY_COMPLETED',
+          'CANCELLED'
+        )),
+        priority TEXT NOT NULL DEFAULT 'NORMAL' CHECK(priority IN ('LOW', 'NORMAL', 'HIGH', 'URGENT')),
+        reason TEXT NOT NULL DEFAULT 'Customer Order Shortage',
+        started_at TEXT NOT NULL DEFAULT '',
+        assigned_supervisor_id TEXT REFERENCES users(id),
+        supervisor_status TEXT NOT NULL DEFAULT 'Unassigned',
+        created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        notes TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO production_requests_migrated (
+        id, request_number, order_id, product_id, requested_qty_scaled, status,
+        assigned_supervisor_id, supervisor_status, created_at, created_by, notes, updated_at
+      )
+      SELECT
+        id, request_number, order_id, product_id, requested_qty_scaled, status,
+        assigned_supervisor_id, supervisor_status, created_at, created_by, notes, updated_at
+      FROM production_requests;
+      DROP TABLE production_requests;
+      ALTER TABLE production_requests_migrated RENAME TO production_requests;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_active_pr_per_order
+        ON production_requests(order_id, product_id)
+        WHERE status != 'CANCELLED';
+      COMMIT;
+    `);
+    db.exec(`PRAGMA foreign_keys = ON;`);
+  }
+
+  // Safe migration for purchase_orders approval columns
+  const poCols = db.prepare(`PRAGMA table_info(purchase_orders)`).all() as Array<{ name: string }>;
+  if (!poCols.some((c) => c.name === 'estimated_total_paise')) {
+    db.exec(`ALTER TABLE purchase_orders ADD COLUMN estimated_total_paise INTEGER NOT NULL DEFAULT 0`);
+    db.exec(`ALTER TABLE purchase_orders ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'NOT_REQUIRED'`);
+    db.exec(`ALTER TABLE purchase_orders ADD COLUMN approved_by TEXT NOT NULL DEFAULT ''`);
+    db.exec(`ALTER TABLE purchase_orders ADD COLUMN approved_at TEXT NOT NULL DEFAULT ''`);
+  }
+
+  // Safe migration for production_runs extended fields
+  const runTableDef = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'production_runs'`)
+    .get() as { sql: string } | undefined;
+  if (runTableDef && !runTableDef.sql.includes('PARTIALLY_COMPLETED')) {
+    db.exec(`PRAGMA foreign_keys = OFF;`);
+    db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE production_runs_migrated (
+        id TEXT PRIMARY KEY,
+        run_number TEXT NOT NULL UNIQUE,
+        production_request_id TEXT NOT NULL UNIQUE REFERENCES production_requests(id),
+        product_id TEXT NOT NULL REFERENCES inventory_items(id),
+        bom_version TEXT NOT NULL DEFAULT 'v1.0',
+        planned_qty_scaled INTEGER NOT NULL CHECK(planned_qty_scaled > 0),
+        actual_output_qty_scaled INTEGER NOT NULL CHECK(actual_output_qty_scaled >= 0),
+        rejected_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(rejected_qty_scaled >= 0),
+        damaged_packaging_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(damaged_packaging_qty_scaled >= 0),
+        wastage_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(wastage_qty_scaled >= 0),
+        variance_qty_scaled INTEGER NOT NULL,
+        yield_percent_bps INTEGER NOT NULL DEFAULT 10000,
+        quality_result TEXT NOT NULL DEFAULT 'PASSED' CHECK(quality_result IN ('PASSED', 'CONDITIONAL', 'FAILED')),
+        status TEXT NOT NULL CHECK(status IN ('POSTED', 'PARTIALLY_COMPLETED')),
+        supervisor_user_id TEXT NOT NULL REFERENCES users(id),
+        supervisor_name TEXT NOT NULL,
+        created_by_name TEXT NOT NULL DEFAULT '',
+        started_at TEXT NOT NULL DEFAULT '',
+        completed_at TEXT NOT NULL DEFAULT '',
+        posted_at TEXT NOT NULL,
+        notes TEXT NOT NULL DEFAULT '',
+        variance_explanation TEXT NOT NULL DEFAULT '',
+        idempotency_key TEXT UNIQUE
+      );
+      INSERT INTO production_runs_migrated (
+        id, run_number, production_request_id, product_id, planned_qty_scaled,
+        actual_output_qty_scaled, wastage_qty_scaled, variance_qty_scaled, status,
+        supervisor_user_id, supervisor_name, posted_at, notes, idempotency_key
+      )
+      SELECT
+        id, run_number, production_request_id, product_id, planned_qty_scaled,
+        actual_output_qty_scaled, wastage_qty_scaled, variance_qty_scaled, status,
+        supervisor_user_id, supervisor_name, posted_at, notes, idempotency_key
+      FROM production_runs;
+      DROP TABLE production_runs;
+      ALTER TABLE production_runs_migrated RENAME TO production_runs;
+      COMMIT;
+    `);
+    db.exec(`PRAGMA foreign_keys = ON;`);
+  }
+
+  // Safe migration for production_run_consumptions extended fields
+  const rcCols = db
+    .prepare(`PRAGMA table_info(production_run_consumptions)`)
+    .all() as Array<{ name: string }>;
+  if (!rcCols.some((c) => c.name === 'additional_consumed_qty_scaled')) {
+    db.exec(`ALTER TABLE production_run_consumptions ADD COLUMN additional_consumed_qty_scaled INTEGER NOT NULL DEFAULT 0`);
+    db.exec(`ALTER TABLE production_run_consumptions ADD COLUMN damaged_qty_scaled INTEGER NOT NULL DEFAULT 0`);
+    db.exec(`ALTER TABLE production_run_consumptions ADD COLUMN variance_qty_scaled INTEGER NOT NULL DEFAULT 0`);
+    db.exec(`ALTER TABLE production_run_consumptions ADD COLUMN variance_percent_bps INTEGER NOT NULL DEFAULT 0`);
+    db.exec(`ALTER TABLE production_run_consumptions ADD COLUMN reason TEXT NOT NULL DEFAULT ''`);
   }
 
   // Safe migration for users role CHECK constraint to include SALESMAN

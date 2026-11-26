@@ -15,8 +15,11 @@ import {
 } from 'lucide-react';
 import { orderAuditService } from '../../services/orderAuditService';
 import type {
+  AuthUser,
+  BomRevisionRequest,
   InventoryCategory,
   InventoryItem,
+  MaterialPurchaseRequirement,
   MaterialShortageQuery,
   Order,
   ProductionRequest,
@@ -24,6 +27,7 @@ import type {
   ProductionRun,
   PurchaseOrder,
   PurchaseReceipt,
+  StockDiscrepancyReport,
   StockMovement,
   Supplier,
 } from '../../types/orderAudit';
@@ -47,7 +51,13 @@ const SHORTAGE_STATUS_TONES: Record<
   RESOLVED: { label: 'Resolved', tone: 'success' },
 };
 
-export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => void }) {
+export function ProductionStockView({
+  currentUser,
+  onDataChanged,
+}: {
+  currentUser?: AuthUser;
+  onDataChanged?: () => void;
+}) {
   const [subTab, setSubTab] = useState<SubTab>('stock');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -56,6 +66,9 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [requests, setRequests] = useState<ProductionRequest[]>([]);
   const [shortages, setShortages] = useState<MaterialShortageQuery[]>([]);
+  const [purchaseRequirements, setPurchaseRequirements] = useState<MaterialPurchaseRequirement[]>([]);
+  const [discrepancies, setDiscrepancies] = useState<StockDiscrepancyReport[]>([]);
+  const [bomRevisions, setBomRevisions] = useState<BomRevisionRequest[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [purchaseReceipts, setPurchaseReceipts] = useState<PurchaseReceipt[]>([]);
   const [runs, setRuns] = useState<ProductionRun[]>([]);
@@ -84,6 +97,7 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
   const [poQty, setPoQty] = useState('');
   const [poUnitCost, setPoUnitCost] = useState('');
   const [poShortageId, setPoShortageId] = useState<string | undefined>(undefined);
+  const [poRequirementId, setPoRequirementId] = useState<string | undefined>(undefined);
   const [poNotes, setPoNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -104,16 +118,20 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
     setLoading(true);
     setError(null);
     try {
-      const [inv, reqs, sh, pos, grns, pruns, sups, ords] = await Promise.all([
-        orderAuditService.listInventoryItems(),
-        orderAuditService.listProductionRequests(),
-        orderAuditService.listMaterialShortages(),
-        orderAuditService.listPurchaseOrders(),
-        orderAuditService.listPurchaseReceipts(),
-        orderAuditService.listProductionRuns(),
-        orderAuditService.listSuppliers(),
-        orderAuditService.listOrdersOnly(),
-      ]);
+      const [inv, reqs, sh, pos, grns, pruns, sups, ords, mprs, discs, bomRevs] =
+        await Promise.all([
+          orderAuditService.listInventoryItems(),
+          orderAuditService.listProductionRequests(),
+          orderAuditService.listMaterialShortages(),
+          orderAuditService.listPurchaseOrders(),
+          orderAuditService.listPurchaseReceipts(),
+          orderAuditService.listProductionRuns(),
+          orderAuditService.listSuppliers(),
+          orderAuditService.listOrdersOnly(),
+          orderAuditService.listMaterialPurchaseRequirements(),
+          orderAuditService.listStockDiscrepancies(),
+          orderAuditService.listBomRevisionRequests(),
+        ]);
       setItems(inv);
       setRequests(reqs);
       setShortages(sh);
@@ -122,6 +140,9 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
       setRuns(pruns);
       setSuppliers(sups.filter((s) => s.isActive));
       setOrders(ords);
+      setPurchaseRequirements(mprs);
+      setDiscrepancies(discs);
+      setBomRevisions(bomRevs);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load Production & Stock data.');
     } finally {
@@ -172,12 +193,86 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
     setPoQty(shortage ? String(shortage.shortageQuantity) : '');
     setPoUnitCost('');
     setPoShortageId(shortage?.id);
+    setPoRequirementId(undefined);
     setPoNotes(
       shortage
         ? `Procurement for ${shortage.requestNumber} (${shortage.orderNumber})`
         : ''
     );
     setPoModalOpen(true);
+  };
+
+  const openPoForRequirement = (req: MaterialPurchaseRequirement) => {
+    const matchingSupplier = suppliers.find((s) =>
+      s.suppliedMaterials.some((m) => m.id === req.materialId)
+    );
+    setPoSupplierId(matchingSupplier?.id ?? suppliers[0]?.id ?? '');
+    setPoItemId(req.materialId);
+    setPoQty(String(req.shortageQuantity));
+    setPoUnitCost('');
+    setPoShortageId(undefined);
+    setPoRequirementId(req.id);
+    setPoNotes(`PO for ${req.requirementNumber} (${req.requestNumber} / ${req.orderNumber})`);
+    setPoModalOpen(true);
+  };
+
+  const handleOwnerApprovePo = async (po: PurchaseOrder, approve: boolean) => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await orderAuditService.approvePurchaseOrderByOwner(po.id, approve);
+      setBannerMsg(`Purchase Order ${res.poNumber} ${res.approvalStatus.toLowerCase()} by Owner.`);
+      await loadAll();
+      onDataChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to review Purchase Order.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleReviewDiscrepancy = async (
+    rep: StockDiscrepancyReport,
+    decision: 'APPROVE' | 'REJECT'
+  ) => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await orderAuditService.reviewStockDiscrepancy(rep.id, decision);
+      setBannerMsg(
+        `Discrepancy report ${res.reportNumber} ${res.status}${
+          decision === 'APPROVE' ? ' with ledger adjustment.' : '.'
+        }`
+      );
+      await loadAll();
+      onDataChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to review stock discrepancy.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleReviewBomRevision = async (
+    rev: BomRevisionRequest,
+    decision: 'APPROVE' | 'REJECT'
+  ) => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await orderAuditService.reviewBomRevisionRequest(rev.id, decision);
+      setBannerMsg(
+        `BOM revision ${res.requestNumber} ${res.status}${
+          decision === 'APPROVE' ? ` (BOM ${res.bomVersion}).` : '.'
+        }`
+      );
+      await loadAll();
+      onDataChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to review BOM revision.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const handleCreatePo = async (e: React.FormEvent) => {
@@ -195,11 +290,16 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
           },
         ],
         shortageQueryIds: poShortageId ? [poShortageId] : undefined,
+        purchaseRequirementIds: poRequirementId ? [poRequirementId] : undefined,
         notes: poNotes,
       });
       setPoModalOpen(false);
       setBannerMsg(
-        `Purchase Order ${res.poNumber} created. Stock remains unchanged until goods receipt is recorded.`
+        `Purchase Order ${res.poNumber} created${
+          res.approvalStatus === 'PENDING_OWNER_APPROVAL'
+            ? ' (Pending Owner approval because total > ₹10,000).'
+            : '. Stock remains unchanged until goods receipt is recorded.'
+        }`
       );
       await loadAll();
       onDataChanged?.();
@@ -475,6 +575,91 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
             </Card>
           )}
 
+          {subTab === 'stock' && discrepancies.length > 0 && (
+            <Card
+              title="Stock Discrepancy Reports (Supervisor Submissions)"
+              subtitle="Review physical vs system stock variances reported by Production Supervisor"
+              noPadding
+            >
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-slate-200 bg-slate-50/80 text-slate-500">
+                    <tr>
+                      <th className="px-4 py-2">Report #</th>
+                      <th className="px-4 py-2">Item</th>
+                      <th className="px-4 py-2 text-right">System → Physical</th>
+                      <th className="px-4 py-2 text-right">Variance</th>
+                      <th className="px-4 py-2">Reason</th>
+                      <th className="px-4 py-2">Status</th>
+                      <th className="px-4 py-2 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {discrepancies.map((rep) => (
+                      <tr key={rep.id}>
+                        <td className="px-4 py-2.5 font-mono font-medium">{rep.reportNumber}</td>
+                        <td className="px-4 py-2.5">
+                          {rep.itemName} <span className="text-slate-400">({rep.sku})</span>
+                        </td>
+                        <td className="px-4 py-2.5 text-right tabular-nums">
+                          {rep.systemQuantity} → {rep.physicalQuantity} {rep.unit}
+                        </td>
+                        <td
+                          className={`px-4 py-2.5 text-right font-semibold ${
+                            rep.differenceQuantity < 0 ? 'text-rose-700' : 'text-emerald-700'
+                          }`}
+                        >
+                          {rep.differenceQuantity > 0
+                            ? `+${rep.differenceQuantity}`
+                            : rep.differenceQuantity}{' '}
+                          {rep.unit}
+                        </td>
+                        <td className="px-4 py-2.5 text-slate-600">{rep.reason}</td>
+                        <td className="px-4 py-2.5">
+                          <ToneBadge
+                            tone={
+                              rep.status === 'APPROVED'
+                                ? 'success'
+                                : rep.status === 'REJECTED'
+                                  ? 'danger'
+                                  : 'warning'
+                            }
+                          >
+                            {rep.status}
+                          </ToneBadge>
+                        </td>
+                        <td className="px-4 py-2.5 text-right whitespace-nowrap space-x-1">
+                          {rep.status === 'OPEN' ? (
+                            <>
+                              <button
+                                type="button"
+                                disabled={submitting}
+                                onClick={() => void handleReviewDiscrepancy(rep, 'APPROVE')}
+                                className="rounded bg-emerald-700 px-2 py-1 text-[11px] font-medium text-white hover:bg-emerald-600"
+                              >
+                                Approve Adjustment
+                              </button>
+                              <button
+                                type="button"
+                                disabled={submitting}
+                                onClick={() => void handleReviewDiscrepancy(rep, 'REJECT')}
+                                className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                              >
+                                Reject
+                              </button>
+                            </>
+                          ) : (
+                            <span className="text-slate-400">{rep.reviewedByName}</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+
           {/* B. PRODUCTION REQUESTS */}
           {subTab === 'requests' && (
             <Card
@@ -641,10 +826,83 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
                 </div>
               </Card>
 
+              {purchaseRequirements.length > 0 && (
+                <Card
+                  title="Supervisor Material Purchase Requirements"
+                  subtitle="Purchase requirements escalated by Production Supervisor for PO preparation"
+                  noPadding
+                >
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="border-b border-slate-200 bg-slate-50/80 text-slate-500">
+                        <tr>
+                          <th className="px-3.5 py-2">Req #</th>
+                          <th className="px-3.5 py-2">Material</th>
+                          <th className="px-3.5 py-2 text-right">Shortfall</th>
+                          <th className="px-3.5 py-2">Priority</th>
+                          <th className="px-3.5 py-2">Stage</th>
+                          <th className="px-3.5 py-2 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {purchaseRequirements.map((req) => (
+                          <tr key={req.id}>
+                            <td className="px-3.5 py-2 font-mono font-medium">{req.requirementNumber}</td>
+                            <td className="px-3.5 py-2">
+                              {req.materialName} ({req.requestNumber})
+                            </td>
+                            <td className="px-3.5 py-2 text-right font-semibold text-rose-700">
+                              {req.shortageQuantity} {req.unit}
+                            </td>
+                            <td className="px-3.5 py-2">
+                              <ToneBadge
+                                tone={
+                                  req.priority === 'URGENT' || req.priority === 'HIGH'
+                                    ? 'danger'
+                                    : 'navy'
+                                }
+                              >
+                                {req.priority}
+                              </ToneBadge>
+                            </td>
+                            <td className="px-3.5 py-2">
+                              <ToneBadge
+                                tone={
+                                  req.status === 'RECEIVED'
+                                    ? 'success'
+                                    : req.status === 'AWAITING_OWNER_APPROVAL'
+                                      ? 'warning'
+                                      : 'navy'
+                                }
+                              >
+                                {req.status.replace(/_/g, ' ')}
+                              </ToneBadge>
+                            </td>
+                            <td className="px-3.5 py-2 text-right">
+                              {req.status === 'SUBMITTED_TO_PROCUREMENT' ? (
+                                <button
+                                  type="button"
+                                  onClick={() => openPoForRequirement(req)}
+                                  className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-blue-900 hover:bg-blue-50"
+                                >
+                                  Raise PO
+                                </button>
+                              ) : (
+                                <span className="text-slate-500">{req.poNumber || 'Linked'}</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              )}
+
               <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
                 <Card
                   title="Purchase Orders"
-                  subtitle="Purchase orders do not increase stock until a receipt is posted"
+                  subtitle="Orders over ₹10,000 require Owner approval; stock only updates on GRN"
                   noPadding
                 >
                   <div className="overflow-x-auto">
@@ -653,49 +911,96 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
                         <tr>
                           <th className="px-3.5 py-2">PO #</th>
                           <th className="px-3.5 py-2">Supplier</th>
-                          <th className="px-3.5 py-2">Items</th>
-                          <th className="px-3.5 py-2">Status</th>
-                          <th className="px-3.5 py-2 text-right">Receipt</th>
+                          <th className="px-3.5 py-2">Items / Value</th>
+                          <th className="px-3.5 py-2">Status & Approval</th>
+                          <th className="px-3.5 py-2 text-right">Action</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {purchaseOrders.map((po) => (
-                          <tr key={po.id}>
-                            <td className="px-3.5 py-2.5 font-medium text-blue-900 tabular-nums">
-                              {po.poNumber}
-                            </td>
-                            <td className="px-3.5 py-2.5 text-slate-700">{po.supplierName}</td>
-                            <td className="px-3.5 py-2.5 text-slate-600">
-                              {po.items
-                                .map((i) => `${i.itemName} (${i.receivedQuantity}/${i.orderedQuantity} ${i.unit})`)
-                                .join(', ')}
-                            </td>
-                            <td className="px-3.5 py-2.5">
-                              <ToneBadge
-                                tone={
-                                  po.status === 'RECEIVED'
-                                    ? 'success'
-                                    : po.status === 'PARTIALLY_RECEIVED'
-                                      ? 'warning'
-                                      : 'neutral'
-                                }
-                              >
-                                {po.status}
-                              </ToneBadge>
-                            </td>
-                            <td className="px-3.5 py-2.5 text-right">
-                              {po.status !== 'RECEIVED' && po.status !== 'CANCELLED' && (
-                                <button
-                                  type="button"
-                                  onClick={() => openGrnModal(po)}
-                                  className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-blue-900 hover:bg-blue-50"
+                        {purchaseOrders.map((po) => {
+                          const needsOwner = po.approvalStatus === 'PENDING_OWNER_APPROVAL';
+                          const rejected = po.approvalStatus === 'REJECTED';
+                          return (
+                            <tr key={po.id}>
+                              <td className="px-3.5 py-2.5 font-medium text-blue-900 tabular-nums">
+                                {po.poNumber}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-slate-700">{po.supplierName}</td>
+                              <td className="px-3.5 py-2.5 text-slate-600">
+                                {po.items
+                                  .map((i) => `${i.itemName} (${i.receivedQuantity}/${i.orderedQuantity} ${i.unit})`)
+                                  .join(', ')}
+                                {(po.estimatedTotal ?? 0) > 0 && (
+                                  <span className="block text-[11px] text-slate-500">
+                                    Est. ₹{po.estimatedTotal?.toLocaleString('en-IN')}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-3.5 py-2.5 space-y-1">
+                                <ToneBadge
+                                  tone={
+                                    po.status === 'RECEIVED'
+                                      ? 'success'
+                                      : po.status === 'PARTIALLY_RECEIVED'
+                                        ? 'warning'
+                                        : 'neutral'
+                                  }
                                 >
-                                  Receive Goods
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
+                                  {po.status}
+                                </ToneBadge>
+                                {po.approvalStatus && po.approvalStatus !== 'NOT_REQUIRED' && (
+                                  <div>
+                                    <ToneBadge
+                                      tone={
+                                        po.approvalStatus === 'APPROVED'
+                                          ? 'success'
+                                          : po.approvalStatus === 'REJECTED'
+                                            ? 'danger'
+                                            : 'warning'
+                                      }
+                                    >
+                                      {po.approvalStatus.replace(/_/g, ' ')}
+                                    </ToneBadge>
+                                  </div>
+                                )}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right space-y-1">
+                                {needsOwner && currentUser?.role === 'OWNER_SUPER_ADMIN' && (
+                                  <div className="flex justify-end gap-1">
+                                    <button
+                                      type="button"
+                                      disabled={submitting}
+                                      onClick={() => void handleOwnerApprovePo(po, true)}
+                                      className="rounded bg-emerald-700 px-2 py-1 text-[11px] font-medium text-white hover:bg-emerald-600"
+                                    >
+                                      Owner Approve
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={submitting}
+                                      onClick={() => void handleOwnerApprovePo(po, false)}
+                                      className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] font-medium text-rose-700"
+                                    >
+                                      Reject
+                                    </button>
+                                  </div>
+                                )}
+                                {po.status !== 'RECEIVED' &&
+                                  po.status !== 'CANCELLED' &&
+                                  !needsOwner &&
+                                  !rejected && (
+                                    <button
+                                      type="button"
+                                      onClick={() => openGrnModal(po)}
+                                      className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-blue-900 hover:bg-blue-50"
+                                    >
+                                      Receive Goods
+                                    </button>
+                                  )}
+                              </td>
+                            </tr>
+                          );
+                        })}
                         {purchaseOrders.length === 0 && (
                           <tr>
                             <td colSpan={5} className="px-3.5 py-6 text-center text-slate-500">
@@ -773,10 +1078,13 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
                   >
                     <option value="ALL">All Statuses</option>
                     <option value="PENDING_SUPERVISOR_REVIEW">Pending Review</option>
+                    <option value="PENDING_MATERIAL_CHECK">Pending Material Check</option>
+                    <option value="MATERIAL_SHORTAGE">Material Shortage</option>
                     <option value="AWAITING_MATERIALS">Awaiting Materials</option>
                     <option value="READY_FOR_PRODUCTION">Ready for Production</option>
                     <option value="IN_PROGRESS">In Progress</option>
                     <option value="COMPLETED">Completed</option>
+                    <option value="PARTIALLY_COMPLETED">Partially Completed</option>
                     <option value="CANCELLED">Cancelled</option>
                   </select>
                 }
@@ -839,7 +1147,8 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
                         <th className="px-4 py-2.5">Request / Order</th>
                         <th className="px-4 py-2.5">Product</th>
                         <th className="px-4 py-2.5 text-right">Planned</th>
-                        <th className="px-4 py-2.5 text-right">Actual Output</th>
+                        <th className="px-4 py-2.5 text-right">Good Output</th>
+                        <th className="px-4 py-2.5 text-right">Rejected / Yield</th>
                         <th className="px-4 py-2.5 text-right">Wastage</th>
                         <th className="px-4 py-2.5 text-right">Variance</th>
                         <th className="px-4 py-2.5">Supervisor</th>
@@ -861,6 +1170,10 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
                           </td>
                           <td className="px-4 py-2.5 text-right tabular-nums font-medium text-slate-900">
                             {run.actualOutputQuantity} {run.unit}
+                          </td>
+                          <td className="px-4 py-2.5 text-right tabular-nums text-xs">
+                            <span className="text-rose-700">{run.rejectedQuantity ?? 0}</span>
+                            <span className="text-slate-400"> · {run.yieldPercent ?? 100}%</span>
                           </td>
                           <td className="px-4 py-2.5 text-right tabular-nums text-amber-700">
                             {run.wastageQuantity} {run.unit}
@@ -888,7 +1201,7 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
                       ))}
                       {runs.length === 0 && (
                         <tr>
-                          <td colSpan={9} className="px-4 py-8 text-center text-xs text-slate-500">
+                          <td colSpan={10} className="px-4 py-8 text-center text-xs text-slate-500">
                             No completed production runs posted by Production Supervisor yet.
                           </td>
                         </tr>
@@ -897,6 +1210,82 @@ export function ProductionStockView({ onDataChanged }: { onDataChanged?: () => v
                   </table>
                 </div>
               </Card>
+
+              {bomRevisions.length > 0 && (
+                <Card
+                  title="BOM Revision Requests (Supervisor Suggestions)"
+                  subtitle="Review shop-floor BOM ratio suggestions. Approving updates the Product Catalogue BOM and bumps version."
+                  noPadding
+                >
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="border-b border-slate-200 bg-slate-50/80 text-slate-500">
+                        <tr>
+                          <th className="px-4 py-2">Revision #</th>
+                          <th className="px-4 py-2">Product (BOM Ver)</th>
+                          <th className="px-4 py-2">Material</th>
+                          <th className="px-4 py-2 text-right">Current → Suggested</th>
+                          <th className="px-4 py-2">Reason</th>
+                          <th className="px-4 py-2">Status</th>
+                          <th className="px-4 py-2 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {bomRevisions.map((rev) => (
+                          <tr key={rev.id}>
+                            <td className="px-4 py-2.5 font-mono font-medium">{rev.requestNumber}</td>
+                            <td className="px-4 py-2.5">
+                              {rev.productName} <span className="text-slate-400">({rev.bomVersion})</span>
+                            </td>
+                            <td className="px-4 py-2.5">{rev.materialName}</td>
+                            <td className="px-4 py-2.5 text-right font-mono">
+                              {rev.currentQuantityPerUnit} → {rev.suggestedQuantityPerUnit} {rev.materialUnit}
+                            </td>
+                            <td className="px-4 py-2.5 text-slate-600">{rev.reason}</td>
+                            <td className="px-4 py-2.5">
+                              <ToneBadge
+                                tone={
+                                  rev.status === 'APPROVED'
+                                    ? 'success'
+                                    : rev.status === 'REJECTED'
+                                      ? 'danger'
+                                      : 'warning'
+                                }
+                              >
+                                {rev.status.replace(/_/g, ' ')}
+                              </ToneBadge>
+                            </td>
+                            <td className="px-4 py-2.5 text-right whitespace-nowrap space-x-1">
+                              {rev.status === 'PENDING_ADMIN_REVIEW' ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={submitting}
+                                    onClick={() => void handleReviewBomRevision(rev, 'APPROVE')}
+                                    className="rounded bg-blue-900 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-800"
+                                  >
+                                    Approve &amp; Update BOM
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={submitting}
+                                    onClick={() => void handleReviewBomRevision(rev, 'REJECT')}
+                                    className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700"
+                                  >
+                                    Reject
+                                  </button>
+                                </>
+                              ) : (
+                                <span className="text-slate-400">{rev.reviewedByName}</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              )}
             </div>
           )}
 

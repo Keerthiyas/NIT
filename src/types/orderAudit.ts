@@ -14,6 +14,13 @@ export type UserRole =
 
 export type SalesmanNavSection = 'dashboard' | 'new-order' | 'my-orders';
 
+export type SupervisorNavSection =
+  | 'dashboard'
+  | 'requests'
+  | 'inventory'
+  | 'execution'
+  | 'history';
+
 export interface AuthUser {
   id: string;
   username: string;
@@ -163,10 +170,13 @@ export interface OrderShortageAnalysis {
 
 export type ProductionRequestStatus =
   | 'PENDING_SUPERVISOR_REVIEW'
+  | 'PENDING_MATERIAL_CHECK'
   | 'AWAITING_MATERIALS'
+  | 'MATERIAL_SHORTAGE'
   | 'READY_FOR_PRODUCTION'
   | 'IN_PROGRESS'
   | 'COMPLETED'
+  | 'PARTIALLY_COMPLETED'
   | 'CANCELLED';
 
 export interface ProductionRequest {
@@ -178,8 +188,12 @@ export interface ProductionRequest {
   productId: string;
   productName: string;
   productSku?: string;
+  bomVersion?: string;
   unit: string;
   requestedQuantity: number;
+  priority?: 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT';
+  reason?: string;
+  startedAt?: string;
   rawMaterialAvailability: 'SUFFICIENT' | 'INSUFFICIENT';
   materialsToPurchase: Array<{
     rawMaterialId: string;
@@ -259,6 +273,8 @@ export interface InventoryItem {
   gstRate: number;
   hsnCode: string;
   imageUrl?: string;
+  bomVersion?: string;
+  usedInProducts?: string[];
   availableStock: number;
   reorderLevel: number;
   isActive: boolean;
@@ -278,7 +294,8 @@ export interface StockMovement {
     | 'PURCHASE_RECEIPT'
     | 'PRODUCTION_CONSUMPTION'
     | 'PRODUCTION_OUTPUT'
-    | 'DISPATCH';
+    | 'DISPATCH'
+    | 'DISCREPANCY_ADJUSTMENT';
   direction: 'IN' | 'OUT';
   quantity: number;
   balanceAfter: number;
@@ -319,6 +336,10 @@ export interface PurchaseOrder {
   supplierCode: string;
   status: 'ORDERED' | 'PARTIALLY_RECEIVED' | 'RECEIVED' | 'CANCELLED';
   orderDate: string;
+  estimatedTotal?: number;
+  approvalStatus?: 'NOT_REQUIRED' | 'PENDING_OWNER_APPROVAL' | 'APPROVED' | 'REJECTED';
+  approvedBy?: string;
+  approvedAt?: string;
   notes?: string;
   createdBy: string;
   createdAt: string;
@@ -333,6 +354,87 @@ export interface PurchaseOrder {
     receivedQuantity: number;
     unitCost: number;
   }>;
+}
+
+export interface MaterialPurchaseRequirement {
+  id: string;
+  requirementNumber: string;
+  materialId: string;
+  materialName: string;
+  materialSku: string;
+  unit: string;
+  category: InventoryCategory;
+  currentStock: number;
+  productionRequestId: string;
+  requestNumber: string;
+  orderId: string;
+  orderNumber: string;
+  requiredQuantity: number;
+  availableQuantity: number;
+  shortageQuantity: number;
+  priority: 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT';
+  reason?: string;
+  status:
+    | 'SUBMITTED_TO_PROCUREMENT'
+    | 'PO_PREPARED'
+    | 'AWAITING_OWNER_APPROVAL'
+    | 'APPROVED_FOR_PURCHASE'
+    | 'PARTIALLY_RECEIVED'
+    | 'RECEIVED'
+    | 'CANCELLED';
+  purchaseOrderId?: string;
+  poNumber?: string;
+  poStatus?: string;
+  poApprovalStatus?: string;
+  poEstimatedTotal?: number;
+  requestedByName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockDiscrepancyReport {
+  id: string;
+  reportNumber: string;
+  itemId: string;
+  itemName: string;
+  sku: string;
+  unit: string;
+  category: InventoryCategory;
+  systemQuantity: number;
+  physicalQuantity: number;
+  differenceQuantity: number;
+  reason: string;
+  status: 'OPEN' | 'APPROVED' | 'REJECTED';
+  reportedByName: string;
+  reviewedByName?: string;
+  reviewNote?: string;
+  createdAt: string;
+  reviewedAt?: string;
+}
+
+export interface BomRevisionRequest {
+  id: string;
+  requestNumber: string;
+  productId: string;
+  productName: string;
+  productSku: string;
+  productUnit: string;
+  bomVersion: string;
+  materialId: string;
+  materialName: string;
+  materialSku: string;
+  materialUnit: string;
+  currentQuantityPerUnit: number;
+  suggestedQuantityPerUnit: number;
+  productionRunId?: string;
+  runNumber?: string;
+  reason: string;
+  status: 'PENDING_ADMIN_REVIEW' | 'APPROVED' | 'REJECTED';
+  requestedByName: string;
+  reviewedByName?: string;
+  reviewNote?: string;
+  createdAt: string;
+  reviewedAt?: string;
 }
 
 export interface PurchaseReceipt {
@@ -368,14 +470,23 @@ export interface ProductionRun {
   productName: string;
   productSku: string;
   unit: string;
+  bomVersion?: string;
   plannedQuantity: number;
   actualOutputQuantity: number;
+  rejectedQuantity?: number;
   wastageQuantity: number;
+  damagedPackagingQuantity?: number;
   varianceQuantity: number;
-  status: 'POSTED';
+  yieldPercent?: number;
+  qualityResult?: 'PASSED' | 'CONDITIONAL' | 'FAILED';
+  status: 'POSTED' | 'PARTIALLY_COMPLETED';
   supervisorName: string;
+  createdByName?: string;
+  startedAt?: string;
+  completedAt?: string;
   postedAt: string;
   notes?: string;
+  varianceExplanation?: string;
   consumptions: Array<{
     id: string;
     materialId: string;
@@ -385,8 +496,82 @@ export interface ProductionRun {
     category: InventoryCategory;
     plannedQuantity: number;
     actualConsumedQuantity: number;
+    additionalConsumedQuantity?: number;
+    damagedQuantity?: number;
     wastageQuantity: number;
+    varianceQuantity?: number;
+    variancePercent?: number;
+    reason?: string;
   }>;
+  linkedMovements?: Array<{
+    id: string;
+    itemName: string;
+    sku: string;
+    unit: string;
+    movementType: string;
+    direction: 'IN' | 'OUT';
+    quantity: number;
+    balanceAfter: number;
+    reason: string;
+    actorName: string;
+    createdAt: string;
+  }>;
+}
+
+export interface SupervisorDashboardData {
+  pendingRequestsCount: number;
+  materialShortageRequestsCount: number;
+  inProgressCount: number;
+  completedRunsCount: number;
+  completedRequestsCount: number;
+  lowStockMaterialsCount: number;
+  pendingPurchaseRequirementsCount: number;
+  openDiscrepanciesCount: number;
+  openBomRevisionsCount: number;
+  alerts: Array<{
+    id: string;
+    severity: 'critical' | 'warning' | 'info';
+    category: 'SHORTAGE' | 'LOW_STOCK' | 'PROCUREMENT' | 'PRODUCTION';
+    title: string;
+    detail: string;
+    relatedRequestId?: string;
+  }>;
+  recentActivity: Array<{
+    id: string;
+    timestamp: string;
+    actorName: string;
+    actorRole: string;
+    entityType: string;
+    entityId: string;
+    action: string;
+    details: string;
+  }>;
+  recentRequests: ProductionRequest[];
+  recentRuns: ProductionRun[];
+}
+
+export interface ProductionRunDraftPayload {
+  productionRequestId: string;
+  payload: {
+    goodOutputQuantity?: number;
+    rejectedQuantity?: number;
+    damagedPackagingQuantity?: number;
+    wastageQuantity?: number;
+    qualityResult?: 'PASSED' | 'CONDITIONAL' | 'FAILED';
+    completionStatus?: 'COMPLETED' | 'PARTIALLY_COMPLETED';
+    notes?: string;
+    varianceExplanation?: string;
+    consumptions?: Array<{
+      materialId: string;
+      actualConsumedQuantity: number;
+      additionalConsumedQuantity?: number;
+      damagedQuantity?: number;
+      wastageQuantity?: number;
+      reason?: string;
+    }>;
+  };
+  updatedByName: string;
+  updatedAt: string;
 }
 
 // --- Dispatches, Billing & Payments ---

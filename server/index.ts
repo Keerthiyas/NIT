@@ -56,6 +56,22 @@ import {
   upsertProductAndBom,
   upsertSupplier,
 } from './services.ts';
+import {
+  approvePurchaseOrderByOwner,
+  checkProductionRequestAvailability,
+  createBomRevisionRequest,
+  createMaterialPurchaseRequirement,
+  createStockDiscrepancyReport,
+  getProductionRunDraft,
+  getSupervisorDashboard,
+  listBomRevisionRequests,
+  listMaterialPurchaseRequirements,
+  listStockDiscrepancyReports,
+  reviewBomRevisionRequest,
+  reviewStockDiscrepancyReport,
+  saveProductionRunDraft,
+  updateRunVarianceExplanation,
+} from './supervisorServices.ts';
 
 async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -220,10 +236,158 @@ export function createApiHandler(db: DatabaseSync) {
           db,
           authed,
           decodeURIComponent(prStatusMatch[1]),
-          body.status as 'READY_FOR_PRODUCTION' | 'IN_PROGRESS' | 'CANCELLED',
+          body.status as
+            | 'PENDING_MATERIAL_CHECK'
+            | 'MATERIAL_SHORTAGE'
+            | 'READY_FOR_PRODUCTION'
+            | 'IN_PROGRESS'
+            | 'CANCELLED',
           body.notes as string | undefined
         );
         return sendJson(res, 200, result);
+      }
+
+      if (method === 'GET' && pathname === '/api/supervisor/dashboard') {
+        const authed = requireRole(actor, ['PRODUCTION_SUPERVISOR']);
+        return sendJson(res, 200, getSupervisorDashboard(db, authed));
+      }
+
+      const supCheckMatch = /^\/api\/supervisor\/production-requests\/([^/]+)\/check-availability$/.exec(
+        pathname
+      );
+      if (method === 'POST' && supCheckMatch) {
+        const authed = requireRole(actor, ['PRODUCTION_SUPERVISOR']);
+        return sendJson(
+          res,
+          200,
+          checkProductionRequestAvailability(db, authed, decodeURIComponent(supCheckMatch[1]))
+        );
+      }
+
+      if (method === 'GET' && pathname === '/api/purchase-requirements') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN', 'PRODUCTION_SUPERVISOR']);
+        return sendJson(res, 200, listMaterialPurchaseRequirements(db, authed));
+      }
+
+      if (method === 'POST' && pathname === '/api/purchase-requirements') {
+        const authed = requireRole(actor, ['PRODUCTION_SUPERVISOR']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          201,
+          createMaterialPurchaseRequirement(
+            db,
+            authed,
+            body as Parameters<typeof createMaterialPurchaseRequirement>[2]
+          )
+        );
+      }
+
+      if (method === 'GET' && pathname === '/api/stock-discrepancies') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN', 'PRODUCTION_SUPERVISOR']);
+        return sendJson(res, 200, listStockDiscrepancyReports(db, authed));
+      }
+
+      if (method === 'POST' && pathname === '/api/stock-discrepancies') {
+        const authed = requireRole(actor, ['PRODUCTION_SUPERVISOR']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          201,
+          createStockDiscrepancyReport(
+            db,
+            authed,
+            body as Parameters<typeof createStockDiscrepancyReport>[2]
+          )
+        );
+      }
+
+      const discReviewMatch = /^\/api\/stock-discrepancies\/([^/]+)\/review$/.exec(pathname);
+      if (method === 'POST' && discReviewMatch) {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          reviewStockDiscrepancyReport(
+            db,
+            authed,
+            decodeURIComponent(discReviewMatch[1]),
+            body.decision as 'APPROVE' | 'REJECT',
+            body.note as string | undefined
+          )
+        );
+      }
+
+      if (method === 'GET' && pathname === '/api/bom-revisions') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN', 'PRODUCTION_SUPERVISOR']);
+        return sendJson(res, 200, listBomRevisionRequests(db, authed));
+      }
+
+      if (method === 'POST' && pathname === '/api/bom-revisions') {
+        const authed = requireRole(actor, ['PRODUCTION_SUPERVISOR']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          201,
+          createBomRevisionRequest(
+            db,
+            authed,
+            body as Parameters<typeof createBomRevisionRequest>[2]
+          )
+        );
+      }
+
+      const bomReviewMatch = /^\/api\/bom-revisions\/([^/]+)\/review$/.exec(pathname);
+      if (method === 'POST' && bomReviewMatch) {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          reviewBomRevisionRequest(
+            db,
+            authed,
+            decodeURIComponent(bomReviewMatch[1]),
+            body.decision as 'APPROVE' | 'REJECT',
+            body.note as string | undefined
+          )
+        );
+      }
+
+      const runDraftMatch = /^\/api\/supervisor\/production-runs\/draft\/([^/]+)$/.exec(pathname);
+      if (runDraftMatch && method === 'GET') {
+        const authed = requireRole(actor, ['PRODUCTION_SUPERVISOR']);
+        return sendJson(
+          res,
+          200,
+          getProductionRunDraft(db, authed, decodeURIComponent(runDraftMatch[1]))
+        );
+      }
+      if (runDraftMatch && method === 'PUT') {
+        const authed = requireRole(actor, ['PRODUCTION_SUPERVISOR']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          saveProductionRunDraft(db, authed, decodeURIComponent(runDraftMatch[1]), body)
+        );
+      }
+
+      const runExpMatch = /^\/api\/supervisor\/production-runs\/([^/]+)\/explanation$/.exec(pathname);
+      if (method === 'PATCH' && runExpMatch) {
+        const authed = requireRole(actor, ['PRODUCTION_SUPERVISOR']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          updateRunVarianceExplanation(
+            db,
+            authed,
+            decodeURIComponent(runExpMatch[1]),
+            String(body.varianceExplanation || '')
+          )
+        );
       }
 
       if (method === 'GET' && pathname === '/api/material-shortages') {
@@ -245,6 +409,23 @@ export function createApiHandler(db: DatabaseSync) {
           body as Parameters<typeof createPurchaseOrder>[2]
         );
         return sendJson(res, 201, result);
+      }
+
+      const poApproveMatch = /^\/api\/purchase-orders\/([^/]+)\/approve$/.exec(pathname);
+      if (method === 'POST' && poApproveMatch) {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          approvePurchaseOrderByOwner(
+            db,
+            authed,
+            decodeURIComponent(poApproveMatch[1]),
+            Boolean(body.approve),
+            body.note as string | undefined
+          )
+        );
       }
 
       if (method === 'GET' && pathname === '/api/purchase-receipts') {
