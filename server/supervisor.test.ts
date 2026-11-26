@@ -77,7 +77,11 @@ describe('Production Supervisor Module — Complete 13-Scenario End-to-End Verif
   it('1-3. Supervisor dashboard, availability checks (sufficient vs shortage), and Admin PR reception', async () => {
     const dash = await callApi(handler, 'GET', '/api/supervisor/dashboard', supervisorToken);
     expect(dash.status).toBe(200);
+    expect(typeof dash.data.pendingRequestsCount).toBe('number');
+    expect(typeof dash.data.lowStockMaterialsCount).toBe('number');
+    expect(typeof dash.data.inProgressCount).toBe('number');
     expect(dash.data.completedRunsCount).toBeGreaterThanOrEqual(1);
+    expect(Array.isArray(dash.data.materialAlerts)).toBe(true);
     expect(Array.isArray(dash.data.alerts)).toBe(true);
     expect(Array.isArray(dash.data.recentActivity)).toBe(true);
 
@@ -253,13 +257,27 @@ describe('Production Supervisor Module — Complete 13-Scenario End-to-End Verif
     // Small order with plenty of stock
     const custs = await callApi(handler, 'GET', '/api/salesman/customers', salesmanToken);
     const prods = await callApi(handler, 'GET', '/api/salesman/products', salesmanToken);
-    const thattai = (prods.data as unknown as Array<Record<string, any>>).find((p) =>
-      String(p.name).includes('Thattai')
-    )!;
+    const prodsList = prods.data as unknown as Array<Record<string, any>>;
+    const prod = prodsList.find((p) => String(p.name).includes('Ribbon')) ?? prodsList[1] ?? prodsList[0];
+
+    const invCheck0 = (await callApi(handler, 'GET', '/api/inventory/items', supervisorToken))
+      .data as unknown as Array<Record<string, any>>;
+    const prodInv0 = invCheck0.find((i) => i.id === prod.id)!;
+    const orderQty = Math.ceil(prodInv0.availableStock + 100);
+
+    // Top up all non-FG materials by 500 units via GRN so test batch has ample material headroom
+    const suppliers0 = (await callApi(handler, 'GET', '/api/management/suppliers', adminToken))
+      .data as unknown as Array<Record<string, any>>;
+    const matsToTopUp = invCheck0.filter((i) => i.category !== 'FINISHED_GOOD');
+    await callApi(handler, 'POST', '/api/purchase-receipts', adminToken, {
+      supplierId: suppliers0[0].id,
+      items: matsToTopUp.map((m) => ({ itemId: m.id, receivedQuantity: 500, unitCost: 10 })),
+      notes: 'Pre-batch replenishment',
+    });
 
     const orderRes = await callApi(handler, 'POST', '/api/salesman/orders', salesmanToken, {
       customerId: (custs.data as unknown as Array<Record<string, any>>)[0].id,
-      items: [{ productId: thattai.id, quantity: 600 }],
+      items: [{ productId: prod.id, quantity: orderQty }],
     });
     const decRes = await callApi(
       handler,

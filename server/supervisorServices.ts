@@ -40,9 +40,13 @@ export function getSupervisorDashboard(db: DatabaseSync, actor: AuthUser) {
   );
 
   const pendingRequests = requests.filter((r) =>
-    ['PENDING_SUPERVISOR_REVIEW', 'PENDING_MATERIAL_CHECK', 'READY_FOR_PRODUCTION'].includes(
-      r.status
-    )
+    [
+      'PENDING_SUPERVISOR_REVIEW',
+      'PENDING_MATERIAL_CHECK',
+      'AWAITING_MATERIALS',
+      'MATERIAL_SHORTAGE',
+      'READY_FOR_PRODUCTION',
+    ].includes(r.status)
   );
   const shortageRequests = requests.filter((r) =>
     ['AWAITING_MATERIALS', 'MATERIAL_SHORTAGE'].includes(r.status)
@@ -52,11 +56,60 @@ export function getSupervisorDashboard(db: DatabaseSync, actor: AuthUser) {
     ['COMPLETED', 'PARTIALLY_COMPLETED'].includes(r.status)
   );
 
+  // Track materials actively causing shortages in open/pending production requests
+  const productionShortfallByMaterial = new Map<string, number>();
+  for (const req of requests) {
+    if (['COMPLETED', 'PARTIALLY_COMPLETED', 'CANCELLED'].includes(req.status)) continue;
+    for (const mat of req.materialsToPurchase) {
+      if (mat.shortfallQuantity > 0) {
+        productionShortfallByMaterial.set(
+          mat.rawMaterialId,
+          (productionShortfallByMaterial.get(mat.rawMaterialId) ?? 0) + mat.shortfallQuantity
+        );
+      }
+    }
+  }
+
   const lowStockMaterials = inventory.filter(
     (item) =>
       (item.category === 'RAW_MATERIAL' || item.category === 'PACKAGING_MATERIAL') &&
       item.availableStock <= item.reorderLevel
   );
+
+  const materialAlerts = inventory
+    .filter(
+      (item) =>
+        (item.category === 'RAW_MATERIAL' || item.category === 'PACKAGING_MATERIAL') &&
+        (item.availableStock <= item.reorderLevel || productionShortfallByMaterial.has(item.id))
+    )
+    .map((item) => {
+      const shortfallQuantity = productionShortfallByMaterial.get(item.id) ?? 0;
+      const affectsProduction = shortfallQuantity > 0;
+      return {
+        id: item.id,
+        name: item.name,
+        unit: item.unit,
+        availableStock: item.availableStock,
+        reorderLevel: item.reorderLevel,
+        affectsProduction,
+        shortfallQuantity,
+        alertType: (affectsProduction ? 'PRODUCTION_SHORTAGE' : 'LOW_STOCK') as
+          | 'PRODUCTION_SHORTAGE'
+          | 'LOW_STOCK',
+      };
+    })
+    .sort((a, b) => {
+      if (a.affectsProduction !== b.affectsProduction) {
+        return a.affectsProduction ? -1 : 1;
+      }
+      if ((a.availableStock === 0) !== (b.availableStock === 0)) {
+        return a.availableStock === 0 ? -1 : 1;
+      }
+      const aRatio = a.availableStock / Math.max(a.reorderLevel, 1);
+      const bRatio = b.availableStock / Math.max(b.reorderLevel, 1);
+      if (aRatio !== bRatio) return aRatio - bRatio;
+      return b.shortfallQuantity - a.shortfallQuantity;
+    });
 
   const activePurchaseReqs = purchaseReqs.filter(
     (p) => p.status !== 'RECEIVED' && p.status !== 'CANCELLED'
@@ -140,6 +193,7 @@ export function getSupervisorDashboard(db: DatabaseSync, actor: AuthUser) {
     pendingPurchaseRequirementsCount: activePurchaseReqs.length,
     openDiscrepanciesCount: openDiscrepancies.length,
     openBomRevisionsCount: openBomRevisions.length,
+    materialAlerts,
     alerts,
     recentActivity: recentActivityRows.map((a) => ({
       id: a.id,

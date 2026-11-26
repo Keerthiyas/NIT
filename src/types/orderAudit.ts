@@ -528,6 +528,16 @@ export interface SupervisorDashboardData {
   pendingPurchaseRequirementsCount: number;
   openDiscrepanciesCount: number;
   openBomRevisionsCount: number;
+  materialAlerts?: Array<{
+    id: string;
+    name: string;
+    unit: string;
+    availableStock: number;
+    reorderLevel: number;
+    affectsProduction: boolean;
+    shortfallQuantity: number;
+    alertType: 'PRODUCTION_SHORTAGE' | 'LOW_STOCK';
+  }>;
   alerts: Array<{
     id: string;
     severity: 'critical' | 'warning' | 'info';

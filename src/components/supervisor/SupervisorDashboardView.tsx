@@ -1,5 +1,4 @@
-import { AlertTriangle, ArrowRight, CheckCircle2, ClipboardList, Factory, Layers } from 'lucide-react';
-import { Card } from '../ui/Card';
+import { AlertTriangle, ClipboardList, Factory } from 'lucide-react';
 import { ProductionStatusBadge } from '../ui/Badge';
 import type { SupervisorDashboardData, SupervisorNavSection } from '../../types/orderAudit';
 
@@ -14,237 +13,174 @@ export function SupervisorDashboardView({
   onNavigate,
   onInspectRequest,
 }: SupervisorDashboardViewProps) {
+  const topMaterialAlerts = (data.materialAlerts ?? []).slice(0, 3);
+  const latestRequests = data.recentRequests.slice(0, 3);
+
   return (
-    <div className="space-y-5">
-      {/* Compact Operational Metrics */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+    <div className="space-y-4">
+      {/* 1. Summary — Strictly 3 compact statistic cards in one row on desktop */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <button
           type="button"
           onClick={() => onNavigate('requests')}
-          className="text-left rounded-lg border border-slate-200 bg-white p-4 hover:border-blue-300 transition-colors"
+          className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 text-left hover:border-blue-300 transition-colors"
         >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-slate-500">Pending Requests</span>
-            <ClipboardList className="h-4 w-4 text-blue-700" />
+          <div>
+            <p className="text-xs font-medium text-slate-500">Pending Requests</p>
+            <p className="mt-1 text-2xl font-semibold text-slate-900 tabular-nums">
+              {data.pendingRequestsCount}
+            </p>
           </div>
-          <p className="mt-1.5 text-2xl font-semibold text-slate-900">
-            {data.pendingRequestsCount}
-          </p>
-          <p className="mt-1 text-xs text-slate-500">Ready or awaiting check</p>
+          <div className="rounded-md bg-blue-50 p-2 text-blue-800">
+            <ClipboardList className="h-4 w-4" />
+          </div>
         </button>
 
         <button
           type="button"
-          onClick={() => onNavigate('requests')}
-          className="text-left rounded-lg border border-slate-200 bg-white p-4 hover:border-rose-300 transition-colors"
+          onClick={() => onNavigate('inventory')}
+          className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 text-left hover:border-amber-300 transition-colors"
         >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-slate-500">Material Shortages</span>
-            <AlertTriangle className="h-4 w-4 text-rose-600" />
+          <div>
+            <p className="text-xs font-medium text-slate-500">Low Stock Materials</p>
+            <p
+              className={`mt-1 text-2xl font-semibold tabular-nums ${
+                data.lowStockMaterialsCount > 0 ? 'text-amber-700' : 'text-slate-900'
+              }`}
+            >
+              {data.lowStockMaterialsCount}
+            </p>
           </div>
-          <p className="mt-1.5 text-2xl font-semibold text-rose-700">
-            {data.materialShortageRequestsCount}
-          </p>
-          <p className="mt-1 text-xs text-slate-500">
-            {data.lowStockMaterialsCount} low-stock materials · {data.pendingPurchaseRequirementsCount} open reqs
-          </p>
+          <div className="rounded-md bg-amber-50 p-2 text-amber-700">
+            <AlertTriangle className="h-4 w-4" />
+          </div>
         </button>
 
         <button
           type="button"
           onClick={() => onNavigate('execution')}
-          className="text-left rounded-lg border border-slate-200 bg-white p-4 hover:border-indigo-300 transition-colors"
+          className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 text-left hover:border-indigo-300 transition-colors"
         >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-slate-500">In Production</span>
-            <Factory className="h-4 w-4 text-indigo-700" />
+          <div>
+            <p className="text-xs font-medium text-slate-500">In Progress</p>
+            <p className="mt-1 text-2xl font-semibold text-slate-900 tabular-nums">
+              {data.inProgressCount}
+            </p>
           </div>
-          <p className="mt-1.5 text-2xl font-semibold text-slate-900">
-            {data.inProgressCount}
-          </p>
-          <p className="mt-1 text-xs text-slate-500">Active batches running</p>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onNavigate('history')}
-          className="text-left rounded-lg border border-slate-200 bg-white p-4 hover:border-emerald-300 transition-colors"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-slate-500">Completed Runs</span>
-            <CheckCircle2 className="h-4 w-4 text-emerald-700" />
+          <div className="rounded-md bg-indigo-50 p-2 text-indigo-700">
+            <Factory className="h-4 w-4" />
           </div>
-          <p className="mt-1.5 text-2xl font-semibold text-slate-900">
-            {data.completedRunsCount}
-          </p>
-          <p className="mt-1 text-xs text-slate-500">Posted & audited runs</p>
         </button>
       </div>
 
-      {/* Material Shortage Alerts & Recent Production Activity */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <Card
-          title="Material & Procurement Alerts"
-          subtitle="Live shortages and low-stock items impacting scheduled production"
-          action={
+      {/* 2. Material Alerts & 3. Recent Production */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+        {/* Material Alerts — Top 3 most important low-stock / shortage materials */}
+        <section className="lg:col-span-5 rounded-lg border border-slate-200 bg-white overflow-hidden">
+          <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5">
+            <h2 className="text-sm font-semibold text-slate-900">Material Alerts</h2>
             <button
               type="button"
               onClick={() => onNavigate('inventory')}
               className="text-xs font-medium text-blue-800 hover:underline"
             >
-              Open Inventory
+              View Inventory
             </button>
-          }
-        >
-          {data.alerts.length === 0 ? (
-            <p className="text-sm text-slate-500 py-3">
-              No active material shortages or low-stock warnings.
+          </div>
+
+          {topMaterialAlerts.length === 0 ? (
+            <p className="px-4 py-6 text-center text-xs text-slate-500">
+              No low-stock or material shortage alerts.
             </p>
           ) : (
-            <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
-              {data.alerts.map((alert) => (
-                <div
-                  key={alert.id}
-                  className={`rounded-md border px-3 py-2.5 flex items-start justify-between gap-3 ${
-                    alert.severity === 'critical'
-                      ? 'bg-rose-50/70 border-rose-200'
-                      : alert.severity === 'warning'
-                        ? 'bg-amber-50/70 border-amber-200'
-                        : 'bg-blue-50/70 border-blue-200'
-                  }`}
+            <ul className="divide-y divide-slate-100">
+              {topMaterialAlerts.map((item) => (
+                <li
+                  key={item.id}
+                  className="flex items-center justify-between gap-3 px-4 py-2.5 text-xs"
                 >
                   <div className="min-w-0">
-                    <p className="text-xs font-semibold text-slate-900">{alert.title}</p>
-                    <p className="text-xs text-slate-600 mt-0.5">{alert.detail}</p>
+                    <p className="font-medium text-slate-900 truncate">{item.name}</p>
+                    <p className="mt-0.5 text-[11px] text-slate-500 tabular-nums">
+                      Available: <span className="font-medium text-slate-700">{item.availableStock} {item.unit}</span>
+                      {' · '}
+                      Reorder: {item.reorderLevel} {item.unit}
+                    </p>
                   </div>
-                  {alert.relatedRequestId && (
-                    <button
-                      type="button"
-                      onClick={() => onInspectRequest(alert.relatedRequestId!)}
-                      className="shrink-0 text-xs font-medium text-blue-900 hover:underline inline-flex items-center gap-0.5"
-                    >
-                      Inspect <ArrowRight className="h-3 w-3" />
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
-
-        <Card
-          title="Recent Production & Material Activity"
-          subtitle="Audit-logged events across production requests, receipts, and runs"
-          action={
-            <span className="inline-flex items-center gap-1 text-xs text-slate-500">
-              <Layers className="h-3.5 w-3.5" />
-              {data.openDiscrepanciesCount} open discrepancies · {data.openBomRevisionsCount} BOM revs
-            </span>
-          }
-        >
-          {data.recentActivity.length === 0 ? (
-            <p className="text-sm text-slate-500 py-3">No recent activity logged yet.</p>
-          ) : (
-            <ul className="divide-y divide-slate-100 max-h-72 overflow-y-auto pr-1">
-              {data.recentActivity.map((act) => (
-                <li key={act.id} className="py-2 text-xs">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold text-slate-800">
-                      {act.action.replace(/_/g, ' ')}
-                    </span>
-                    <span className="text-slate-400">
-                      {new Date(act.timestamp).toLocaleString()}
-                    </span>
-                  </div>
-                  <p className="text-slate-600 mt-0.5">{act.details}</p>
-                  <p className="text-[11px] text-slate-400 mt-0.5">By {act.actorName}</p>
+                  <span
+                    className={`shrink-0 inline-flex items-center rounded border px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap ${
+                      item.affectsProduction
+                        ? 'bg-rose-50 text-rose-700 border-rose-200'
+                        : 'bg-amber-50 text-amber-800 border-amber-200'
+                    }`}
+                  >
+                    {item.affectsProduction ? 'Shortage' : 'Low Stock'}
+                  </span>
                 </li>
               ))}
             </ul>
           )}
-        </Card>
-      </div>
+        </section>
 
-      {/* Compact Recent Production Requests Table */}
-      <Card
-        title="Recent Production Requests"
-        subtitle="Requests dispatched from Admin order review"
-        action={
-          <button
-            type="button"
-            onClick={() => onNavigate('requests')}
-            className="text-xs font-medium text-blue-800 hover:underline inline-flex items-center gap-1"
-          >
-            View All Requests <ArrowRight className="h-3.5 w-3.5" />
-          </button>
-        }
-        noPadding
-      >
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-200 text-xs">
-            <thead className="bg-slate-50 text-slate-600">
-              <tr>
-                <th className="px-4 py-2.5 text-left font-semibold">Request ID</th>
-                <th className="px-4 py-2.5 text-left font-semibold">Product</th>
-                <th className="px-4 py-2.5 text-right font-semibold">Qty</th>
-                <th className="px-4 py-2.5 text-left font-semibold">Customer Order</th>
-                <th className="px-4 py-2.5 text-left font-semibold">Materials</th>
-                <th className="px-4 py-2.5 text-left font-semibold">Status</th>
-                <th className="px-4 py-2.5 text-right font-semibold">Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 bg-white">
-              {data.recentRequests.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="px-4 py-6 text-center text-slate-500">
-                    No production requests available.
-                  </td>
-                </tr>
-              ) : (
-                data.recentRequests.map((req) => (
-                  <tr key={req.id} className="hover:bg-slate-50/70">
-                    <td className="px-4 py-2.5 font-mono font-medium text-slate-900">
-                      {req.requestNumber}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <p className="font-medium text-slate-900">{req.productName}</p>
-                      <p className="text-[11px] text-slate-500">{req.productSku}</p>
-                    </td>
-                    <td className="px-4 py-2.5 text-right font-medium text-slate-900">
-                      {req.requestedQuantity} {req.unit}
-                    </td>
-                    <td className="px-4 py-2.5 text-slate-700">
-                      <span className="font-mono">{req.orderNumber}</span>
-                      {req.customerName ? ` · ${req.customerName}` : ''}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      {req.rawMaterialAvailability === 'SUFFICIENT' ? (
-                        <span className="text-emerald-700 font-medium">Sufficient</span>
-                      ) : (
-                        <span className="text-rose-700 font-medium">
-                          {req.materialsToPurchase.length} short
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <ProductionStatusBadge status={req.status} />
-                    </td>
-                    <td className="px-4 py-2.5 text-right">
-                      <button
-                        type="button"
-                        onClick={() => onInspectRequest(req.id)}
-                        className="rounded border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-blue-900 hover:bg-blue-50"
-                      >
-                        Open
-                      </button>
-                    </td>
+        {/* Recent Production — Latest 3 requests; clicking opens corresponding request */}
+        <section className="lg:col-span-7 rounded-lg border border-slate-200 bg-white overflow-hidden">
+          <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5">
+            <h2 className="text-sm font-semibold text-slate-900">Recent Production</h2>
+            <button
+              type="button"
+              onClick={() => onNavigate('requests')}
+              className="text-xs font-medium text-blue-800 hover:underline"
+            >
+              View All
+            </button>
+          </div>
+
+          {latestRequests.length === 0 ? (
+            <p className="px-4 py-6 text-center text-xs text-slate-500">
+              No pending or recent production requests.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-slate-200 text-xs">
+                <thead className="bg-slate-50 text-slate-500">
+                  <tr>
+                    <th className="px-4 py-2 text-left font-medium">Product</th>
+                    <th className="px-4 py-2 text-left font-medium">Request ID</th>
+                    <th className="px-4 py-2 text-right font-medium">Planned Qty</th>
+                    <th className="px-4 py-2 text-right font-medium">Status</th>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+                </thead>
+                <tbody className="divide-y divide-slate-100 bg-white">
+                  {latestRequests.map((req) => (
+                    <tr
+                      key={req.id}
+                      onClick={() => onInspectRequest(req.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          onInspectRequest(req.id);
+                        }
+                      }}
+                      tabIndex={0}
+                      role="button"
+                      className="cursor-pointer hover:bg-slate-50 transition-colors focus:bg-blue-50/50 focus:outline-none"
+                    >
+                      <td className="px-4 py-2.5 font-medium text-slate-900">{req.productName}</td>
+                      <td className="px-4 py-2.5 font-mono text-slate-600">{req.requestNumber}</td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-slate-800">
+                        {req.requestedQuantity} {req.unit}
+                      </td>
+                      <td className="px-4 py-2.5 text-right">
+                        <ProductionStatusBadge status={req.status} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      </div>
     </div>
   );
 }
