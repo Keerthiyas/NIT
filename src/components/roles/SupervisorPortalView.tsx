@@ -38,6 +38,9 @@ export function SupervisorPortalView({ user, onLogout }: SupervisorPortalViewPro
   const [bomRevisions, setBomRevisions] = useState<BomRevisionRequest[]>([]);
 
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
+  const [requestsFilter, setRequestsFilter] = useState<string>('ALL');
+  const [inventoryLowStockOnly, setInventoryLowStockOnly] = useState<boolean>(false);
+  const [highlightItemId, setHighlightItemId] = useState<string | null>(null);
   const [executionRequestId, setExecutionRequestId] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
@@ -122,8 +125,47 @@ export function SupervisorPortalView({ user, onLogout }: SupervisorPortalViewPro
           {activeSection === 'dashboard' && dashboard && (
             <SupervisorDashboardView
               data={dashboard}
-              onNavigate={setActiveSection}
+              inventoryItems={inventoryItems}
+              requests={requests}
+              loading={loading}
+              error={error}
+              onRetry={() => void loadData()}
+              onNavigate={(section) => {
+                if (section === 'inventory') {
+                  setInventoryLowStockOnly(false);
+                  setHighlightItemId(null);
+                } else if (section === 'requests') {
+                  setRequestsFilter('ALL');
+                }
+                setActiveSection(section);
+              }}
+              onOpenPendingRequests={() => {
+                setRequestsFilter('PENDING_GROUP');
+                setSelectedRequestId(null);
+                setActiveSection('requests');
+              }}
+              onOpenLowStockInventory={() => {
+                setInventoryLowStockOnly(true);
+                setHighlightItemId(null);
+                setActiveSection('inventory');
+              }}
+              onOpenActiveProduction={() => {
+                setRequestsFilter('IN_PROGRESS');
+                setSelectedRequestId(null);
+                setActiveSection('requests');
+              }}
+              onOpenAllRequests={() => {
+                setRequestsFilter('ALL');
+                setSelectedRequestId(null);
+                setActiveSection('requests');
+              }}
+              onOpenMaterialDetail={(itemId) => {
+                setInventoryLowStockOnly(true);
+                setHighlightItemId(itemId);
+                setActiveSection('inventory');
+              }}
               onInspectRequest={(reqId) => {
+                setRequestsFilter('ALL');
                 setSelectedRequestId(reqId);
                 setActiveSection('requests');
               }}
@@ -136,6 +178,7 @@ export function SupervisorPortalView({ user, onLogout }: SupervisorPortalViewPro
               purchaseRequirements={purchaseRequirements}
               bomRevisions={bomRevisions}
               selectedRequestId={selectedRequestId}
+              initialStatusFilter={requestsFilter}
               onSelectRequest={setSelectedRequestId}
               onStartExecution={(reqId) => {
                 setExecutionRequestId(reqId);
@@ -150,6 +193,8 @@ export function SupervisorPortalView({ user, onLogout }: SupervisorPortalViewPro
               items={inventoryItems}
               movements={movements}
               discrepancies={discrepancies}
+              initialLowStockOnly={inventoryLowStockOnly}
+              initialHighlightItemId={highlightItemId}
               onRefresh={loadData}
             />
           )}

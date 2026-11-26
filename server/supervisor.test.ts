@@ -45,6 +45,7 @@ async function callApi(
 }
 
 describe('Production Supervisor Module — Complete 13-Scenario End-to-End Verification', () => {
+  let db: ReturnType<typeof openDatabase>;
   let handler: ReturnType<typeof createApiHandler>;
   let ownerToken: string;
   let adminToken: string;
@@ -53,7 +54,7 @@ describe('Production Supervisor Module — Complete 13-Scenario End-to-End Verif
   let salesmanToken: string;
 
   beforeEach(async () => {
-    const db = openDatabase(':memory:');
+    db = openDatabase(':memory:');
     seedDatabaseIfEmpty(db);
     handler = createApiHandler(db);
 
@@ -510,5 +511,97 @@ describe('Production Supervisor Module — Complete 13-Scenario End-to-End Verif
         })
       ).status
     ).toBe(403);
+  });
+
+  it('14. Supervisor Dashboard consistency across 3 low-stock, 0 low-stock, multiple pending, active production & empty history', async () => {
+    // A. Default seeded state: 3 low-stock materials (< reorderLevel) MUST match materialAlerts
+    const dash1 = await callApi(handler, 'GET', '/api/supervisor/dashboard', supervisorToken);
+    expect(dash1.status).toBe(200);
+    const lowStockAlerts1 = (dash1.data.materialAlerts as Array<Record<string, any>>).filter(
+      (a) => a.isLowStock
+    );
+    expect(dash1.data.lowStockMaterialsCount).toBe(3);
+    expect(lowStockAlerts1).toHaveLength(3);
+    for (const a of lowStockAlerts1) {
+      expect(a.availableStock).toBeLessThan(a.reorderLevel);
+    }
+
+    // B. Multiple pending requests & active production (IN_PROGRESS)
+    const custs = (await callApi(handler, 'GET', '/api/salesman/customers', salesmanToken))
+      .data as unknown as Array<Record<string, any>>;
+    const prods = (await callApi(handler, 'GET', '/api/salesman/products', salesmanToken))
+      .data as unknown as Array<Record<string, any>>;
+    const invBefore = (await callApi(handler, 'GET', '/api/inventory/items', supervisorToken))
+      .data as unknown as Array<Record<string, any>>;
+
+    const ord1 = await callApi(handler, 'POST', '/api/salesman/orders', salesmanToken, {
+      customerId: custs[0].id,
+      items: [
+        {
+          productId: prods[0].id,
+          quantity: Math.ceil(invBefore.find((i) => i.id === prods[0].id)!.availableStock + 50),
+        },
+      ],
+    });
+    const ord2 = await callApi(handler, 'POST', '/api/salesman/orders', salesmanToken, {
+      customerId: custs[0].id,
+      items: [
+        {
+          productId: prods[1].id,
+          quantity: Math.ceil(invBefore.find((i) => i.id === prods[1].id)!.availableStock + 50),
+        },
+      ],
+    });
+
+    const dec1 = await callApi(handler, 'POST', `/api/orders/${ord1.data.id}/decision`, adminToken, {
+      decision: 'SEND_FOR_PRODUCTION',
+    });
+    await callApi(handler, 'POST', `/api/orders/${ord2.data.id}/decision`, adminToken, {
+      decision: 'SEND_FOR_PRODUCTION',
+    });
+
+    // Move first PR to IN_PROGRESS
+    await callApi(
+      handler,
+      'PATCH',
+      `/api/production-requests/${dec1.data.createdRequestId}/status`,
+      supervisorToken,
+      { status: 'IN_PROGRESS' }
+    );
+
+    const dash2 = await callApi(handler, 'GET', '/api/supervisor/dashboard', supervisorToken);
+    expect(dash2.data.inProgressCount).toBeGreaterThanOrEqual(1);
+    expect(dash2.data.pendingRequestsCount).toBeGreaterThanOrEqual(1);
+    expect((dash2.data.recentRequests as Array<Record<string, any>>).length).toBeGreaterThanOrEqual(3);
+
+    // C. Replenish ALL low-stock materials -> count and low-stock alerts both become 0
+    const suppliers = (await callApi(handler, 'GET', '/api/management/suppliers', adminToken))
+      .data as unknown as Array<Record<string, any>>;
+    const lowItems = invBefore.filter(
+      (i) =>
+        (i.category === 'RAW_MATERIAL' || i.category === 'PACKAGING_MATERIAL') &&
+        i.availableStock < i.reorderLevel
+    );
+    await callApi(handler, 'POST', '/api/purchase-receipts', adminToken, {
+      supplierId: suppliers[0].id,
+      items: lowItems.map((m) => ({
+        itemId: m.id,
+        receivedQuantity: m.reorderLevel - m.availableStock + 50,
+        unitCost: 10,
+      })),
+    });
+
+    const dash3 = await callApi(handler, 'GET', '/api/supervisor/dashboard', supervisorToken);
+    expect(dash3.data.lowStockMaterialsCount).toBe(0);
+    expect(
+      (dash3.data.materialAlerts as Array<Record<string, any>>).filter((a) => a.isLowStock)
+    ).toHaveLength(0);
+
+    // D. Empty production history -> dashboard still loads clean metrics with 0 completed runs
+    db.exec(`DELETE FROM production_runs;`);
+    const dash4 = await callApi(handler, 'GET', '/api/supervisor/dashboard', supervisorToken);
+    expect(dash4.status).toBe(200);
+    expect(dash4.data.completedRunsCount).toBe(0);
+    expect(dash4.data.recentRuns).toHaveLength(0);
   });
 });

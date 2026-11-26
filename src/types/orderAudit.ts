@@ -534,6 +534,7 @@ export interface SupervisorDashboardData {
     unit: string;
     availableStock: number;
     reorderLevel: number;
+    isLowStock?: boolean;
     affectsProduction: boolean;
     shortfallQuantity: number;
     alertType: 'PRODUCTION_SHORTAGE' | 'LOW_STOCK';

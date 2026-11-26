@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -22,22 +22,38 @@ interface SupervisorRequestsViewProps {
   purchaseRequirements: MaterialPurchaseRequirement[];
   bomRevisions: BomRevisionRequest[];
   selectedRequestId: string | null;
+  initialStatusFilter?: string;
   onSelectRequest: (id: string | null) => void;
   onStartExecution: (requestId: string) => void;
   onRefresh: () => Promise<void>;
 }
+
+const PENDING_GROUP_STATUSES = new Set([
+  'PENDING_SUPERVISOR_REVIEW',
+  'PENDING_MATERIAL_CHECK',
+  'AWAITING_MATERIALS',
+  'MATERIAL_SHORTAGE',
+  'READY_FOR_PRODUCTION',
+]);
 
 export function SupervisorRequestsView({
   requests,
   purchaseRequirements,
   bomRevisions,
   selectedRequestId,
+  initialStatusFilter,
   onSelectRequest,
   onStartExecution,
   onRefresh,
 }: SupervisorRequestsViewProps) {
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<string>('ALL');
+  const [statusFilter, setStatusFilter] = useState<string>(initialStatusFilter || 'ALL');
+
+  useEffect(() => {
+    if (initialStatusFilter) {
+      setStatusFilter(initialStatusFilter);
+    }
+  }, [initialStatusFilter]);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
@@ -70,7 +86,11 @@ export function SupervisorRequestsView({
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return requests.filter((r) => {
-      if (statusFilter !== 'ALL' && r.status !== statusFilter) return false;
+      if (statusFilter === 'PENDING_GROUP') {
+        if (!PENDING_GROUP_STATUSES.has(r.status)) return false;
+      } else if (statusFilter !== 'ALL' && r.status !== statusFilter) {
+        return false;
+      }
       if (!q) return true;
       return (
         r.requestNumber.toLowerCase().includes(q) ||
@@ -234,6 +254,7 @@ export function SupervisorRequestsView({
             className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700"
           >
             <option value="ALL">All Statuses</option>
+            <option value="PENDING_GROUP">Pending Requests</option>
             <option value="PENDING_SUPERVISOR_REVIEW">Pending Supervisor Review</option>
             <option value="PENDING_MATERIAL_CHECK">Pending Material Check</option>
             <option value="MATERIAL_SHORTAGE">Material Shortage</option>

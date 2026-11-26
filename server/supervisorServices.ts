@@ -73,16 +73,17 @@ export function getSupervisorDashboard(db: DatabaseSync, actor: AuthUser) {
   const lowStockMaterials = inventory.filter(
     (item) =>
       (item.category === 'RAW_MATERIAL' || item.category === 'PACKAGING_MATERIAL') &&
-      item.availableStock <= item.reorderLevel
+      item.availableStock < item.reorderLevel
   );
 
   const materialAlerts = inventory
     .filter(
       (item) =>
         (item.category === 'RAW_MATERIAL' || item.category === 'PACKAGING_MATERIAL') &&
-        (item.availableStock <= item.reorderLevel || productionShortfallByMaterial.has(item.id))
+        (item.availableStock < item.reorderLevel || productionShortfallByMaterial.has(item.id))
     )
     .map((item) => {
+      const isLowStock = item.availableStock < item.reorderLevel;
       const shortfallQuantity = productionShortfallByMaterial.get(item.id) ?? 0;
       const affectsProduction = shortfallQuantity > 0;
       return {
@@ -91,14 +92,20 @@ export function getSupervisorDashboard(db: DatabaseSync, actor: AuthUser) {
         unit: item.unit,
         availableStock: item.availableStock,
         reorderLevel: item.reorderLevel,
+        isLowStock,
         affectsProduction,
         shortfallQuantity,
-        alertType: (affectsProduction ? 'PRODUCTION_SHORTAGE' : 'LOW_STOCK') as
-          | 'PRODUCTION_SHORTAGE'
-          | 'LOW_STOCK',
+        alertType: (affectsProduction && !isLowStock
+          ? 'PRODUCTION_SHORTAGE'
+          : affectsProduction
+            ? 'PRODUCTION_SHORTAGE'
+            : 'LOW_STOCK') as 'PRODUCTION_SHORTAGE' | 'LOW_STOCK',
       };
     })
     .sort((a, b) => {
+      if (a.isLowStock !== b.isLowStock) {
+        return a.isLowStock ? -1 : 1;
+      }
       if (a.affectsProduction !== b.affectsProduction) {
         return a.affectsProduction ? -1 : 1;
       }

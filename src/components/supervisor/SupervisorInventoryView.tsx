@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, History, Search } from 'lucide-react';
 import { orderAuditService } from '../../services/orderAuditService';
 import type {
@@ -14,6 +14,8 @@ interface SupervisorInventoryViewProps {
   items: InventoryItem[];
   movements: StockMovement[];
   discrepancies: StockDiscrepancyReport[];
+  initialLowStockOnly?: boolean;
+  initialHighlightItemId?: string | null;
   onRefresh: () => Promise<void>;
 }
 
@@ -27,13 +29,28 @@ export function SupervisorInventoryView({
   items,
   movements,
   discrepancies,
+  initialLowStockOnly = false,
+  initialHighlightItemId = null,
   onRefresh,
 }: SupervisorInventoryViewProps) {
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<'ALL' | InventoryCategory>('ALL');
-  const [lowStockOnly, setLowStockOnly] = useState(false);
+  const [lowStockOnly, setLowStockOnly] = useState(initialLowStockOnly);
 
   const [historyItem, setHistoryItem] = useState<InventoryItem | null>(null);
+
+  useEffect(() => {
+    setLowStockOnly(initialLowStockOnly);
+  }, [initialLowStockOnly]);
+
+  useEffect(() => {
+    if (initialHighlightItemId) {
+      const target = items.find((i) => i.id === initialHighlightItemId) ?? null;
+      if (target) {
+        setHistoryItem(target);
+      }
+    }
+  }, [initialHighlightItemId, items]);
   const [discrepancyModal, setDiscrepancyModal] = useState<{
     item: InventoryItem;
     physicalQuantity: number;
@@ -46,7 +63,7 @@ export function SupervisorInventoryView({
     const q = search.trim().toLowerCase();
     return items.filter((it) => {
       if (categoryFilter !== 'ALL' && it.category !== categoryFilter) return false;
-      if (lowStockOnly && it.availableStock > it.reorderLevel) return false;
+      if (lowStockOnly && it.availableStock >= it.reorderLevel) return false;
       if (!q) return true;
       return (
         it.name.toLowerCase().includes(q) ||

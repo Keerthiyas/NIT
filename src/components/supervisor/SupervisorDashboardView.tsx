@@ -1,142 +1,300 @@
-import { AlertTriangle, ClipboardList, Factory } from 'lucide-react';
+import { useMemo } from 'react';
+import { AlertTriangle, ChevronRight, ClipboardList, Factory } from 'lucide-react';
 import { ProductionStatusBadge } from '../ui/Badge';
-import type { SupervisorDashboardData, SupervisorNavSection } from '../../types/orderAudit';
+import type {
+  InventoryItem,
+  ProductionRequest,
+  SupervisorDashboardData,
+  SupervisorNavSection,
+} from '../../types/orderAudit';
 
 interface SupervisorDashboardViewProps {
   data: SupervisorDashboardData;
+  inventoryItems: InventoryItem[];
+  requests: ProductionRequest[];
+  loading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
   onNavigate: (section: SupervisorNavSection) => void;
+  onOpenPendingRequests: () => void;
+  onOpenLowStockInventory: () => void;
+  onOpenActiveProduction: () => void;
+  onOpenAllRequests: () => void;
+  onOpenMaterialDetail: (itemId: string) => void;
   onInspectRequest: (requestId: string) => void;
 }
 
+const PENDING_STATUSES = new Set([
+  'PENDING_SUPERVISOR_REVIEW',
+  'PENDING_MATERIAL_CHECK',
+  'AWAITING_MATERIALS',
+  'MATERIAL_SHORTAGE',
+  'READY_FOR_PRODUCTION',
+]);
+
 export function SupervisorDashboardView({
   data,
-  onNavigate,
+  inventoryItems,
+  requests,
+  loading = false,
+  error = null,
+  onRetry,
+  onOpenPendingRequests,
+  onOpenLowStockInventory,
+  onOpenActiveProduction,
+  onOpenAllRequests,
+  onOpenMaterialDetail,
   onInspectRequest,
 }: SupervisorDashboardViewProps) {
-  const topMaterialAlerts = (data.materialAlerts ?? []).slice(0, 3);
-  const latestRequests = data.recentRequests.slice(0, 3);
+  // Derive consistent metrics & alerts directly from live shared backend inventory + requests
+  // (using data.materialAlerts when present, and falling back identically from inventoryItems)
+  const { pendingCount, lowStockCount, inProgressCount, allAlerts } = useMemo(() => {
+    const activeRequests = requests.length > 0 ? requests : data.recentRequests;
+    const pending = activeRequests.filter((r) => PENDING_STATUSES.has(r.status)).length;
+    const active = activeRequests.filter((r) => r.status === 'IN_PROGRESS').length;
+
+    const shortfallMap = new Map<string, number>();
+    for (const req of activeRequests) {
+      if (['COMPLETED', 'PARTIALLY_COMPLETED', 'CANCELLED'].includes(req.status)) continue;
+      for (const mat of req.materialsToPurchase ?? []) {
+        if (mat.shortfallQuantity > 0) {
+          shortfallMap.set(
+            mat.rawMaterialId,
+            (shortfallMap.get(mat.rawMaterialId) ?? 0) + mat.shortfallQuantity
+          );
+        }
+      }
+    }
+
+    const materialItems = inventoryItems.filter(
+      (i) => i.category === 'RAW_MATERIAL' || i.category === 'PACKAGING_MATERIAL'
+    );
+
+    const lowCountFromInv = materialItems.filter(
+      (i) => i.availableStock < i.reorderLevel
+    ).length;
+
+    const computedAlerts =
+      data.materialAlerts && data.materialAlerts.length > 0
+        ? data.materialAlerts
+        : materialItems
+            .filter(
+              (i) => i.availableStock < i.reorderLevel || shortfallMap.has(i.id)
+            )
+            .map((i) => {
+              const isLowStock = i.availableStock < i.reorderLevel;
+              const shortfallQuantity = shortfallMap.get(i.id) ?? 0;
+              return {
+                id: i.id,
+                name: i.name,
+                unit: i.unit,
+                availableStock: i.availableStock,
+                reorderLevel: i.reorderLevel,
+                isLowStock,
+                affectsProduction: shortfallQuantity > 0,
+                shortfallQuantity,
+                alertType: (shortfallQuantity > 0
+                  ? 'PRODUCTION_SHORTAGE'
+                  : 'LOW_STOCK') as 'PRODUCTION_SHORTAGE' | 'LOW_STOCK',
+              };
+            })
+            .sort((a, b) => {
+              if (a.isLowStock !== b.isLowStock) return a.isLowStock ? -1 : 1;
+              if (a.affectsProduction !== b.affectsProduction) {
+                return a.affectsProduction ? -1 : 1;
+              }
+              return (
+                a.availableStock / Math.max(a.reorderLevel, 1) -
+                b.availableStock / Math.max(b.reorderLevel, 1)
+              );
+            });
+
+    return {
+      pendingCount: inventoryItems.length > 0 || requests.length > 0 ? pending : data.pendingRequestsCount,
+      lowStockCount: materialItems.length > 0 ? lowCountFromInv : data.lowStockMaterialsCount,
+      inProgressCount: inventoryItems.length > 0 || requests.length > 0 ? active : data.inProgressCount,
+      allAlerts: computedAlerts,
+    };
+  }, [data, inventoryItems, requests]);
+
+  const topMaterialAlerts = allAlerts.slice(0, 3);
+  const hasMoreAlerts = allAlerts.length > 3;
+  const latestRequests = (requests.length > 0 ? requests : data.recentRequests).slice(0, 3);
+
+  if (loading && inventoryItems.length === 0 && requests.length === 0) {
+    return (
+      <div className="rounded-lg border border-slate-200 bg-white px-4 py-6 text-center text-xs text-slate-500">
+        Loading production summary...
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
-      {/* 1. Summary — Strictly 3 compact statistic cards in one row on desktop */}
+      {error && (
+        <div className="flex items-center justify-between gap-2 rounded-md border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs text-rose-800">
+          <span>{error}</span>
+          {onRetry && (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="rounded border border-rose-300 bg-white px-2 py-0.5 font-medium text-rose-800 hover:bg-rose-50"
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* 1. Summary — 3 Interactive Compact Cards in One Row on Desktop */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <button
           type="button"
-          onClick={() => onNavigate('requests')}
-          className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 text-left hover:border-blue-300 transition-colors"
+          onClick={onOpenPendingRequests}
+          className="group flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 text-left shadow-xs transition-all duration-150 hover:border-blue-400 hover:shadow-sm active:scale-[0.99] cursor-pointer"
         >
           <div>
-            <p className="text-xs font-medium text-slate-500">Pending Requests</p>
+            <p className="text-xs font-medium text-slate-500 group-hover:text-blue-900 transition-colors">
+              Pending Requests
+            </p>
             <p className="mt-1 text-2xl font-semibold text-slate-900 tabular-nums">
-              {data.pendingRequestsCount}
+              {pendingCount}
             </p>
           </div>
-          <div className="rounded-md bg-blue-50 p-2 text-blue-800">
+          <div className="rounded-md bg-blue-50 p-2 text-blue-800 group-hover:bg-blue-100 transition-colors">
             <ClipboardList className="h-4 w-4" />
           </div>
         </button>
 
         <button
           type="button"
-          onClick={() => onNavigate('inventory')}
-          className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 text-left hover:border-amber-300 transition-colors"
+          onClick={onOpenLowStockInventory}
+          className="group flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 text-left shadow-xs transition-all duration-150 hover:border-amber-400 hover:shadow-sm active:scale-[0.99] cursor-pointer"
         >
           <div>
-            <p className="text-xs font-medium text-slate-500">Low Stock Materials</p>
+            <p className="text-xs font-medium text-slate-500 group-hover:text-amber-800 transition-colors">
+              Low Stock Materials
+            </p>
             <p
               className={`mt-1 text-2xl font-semibold tabular-nums ${
-                data.lowStockMaterialsCount > 0 ? 'text-amber-700' : 'text-slate-900'
+                lowStockCount > 0 ? 'text-amber-700' : 'text-slate-900'
               }`}
             >
-              {data.lowStockMaterialsCount}
+              {lowStockCount}
             </p>
           </div>
-          <div className="rounded-md bg-amber-50 p-2 text-amber-700">
+          <div className="rounded-md bg-amber-50 p-2 text-amber-700 group-hover:bg-amber-100 transition-colors">
             <AlertTriangle className="h-4 w-4" />
           </div>
         </button>
 
         <button
           type="button"
-          onClick={() => onNavigate('execution')}
-          className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 text-left hover:border-indigo-300 transition-colors"
+          onClick={onOpenActiveProduction}
+          className="group flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 text-left shadow-xs transition-all duration-150 hover:border-indigo-400 hover:shadow-sm active:scale-[0.99] cursor-pointer"
         >
           <div>
-            <p className="text-xs font-medium text-slate-500">In Progress</p>
+            <p className="text-xs font-medium text-slate-500 group-hover:text-indigo-900 transition-colors">
+              In Progress
+            </p>
             <p className="mt-1 text-2xl font-semibold text-slate-900 tabular-nums">
-              {data.inProgressCount}
+              {inProgressCount}
             </p>
           </div>
-          <div className="rounded-md bg-indigo-50 p-2 text-indigo-700">
+          <div className="rounded-md bg-indigo-50 p-2 text-indigo-700 group-hover:bg-indigo-100 transition-colors">
             <Factory className="h-4 w-4" />
           </div>
         </button>
       </div>
 
-      {/* 2. Material Alerts & 3. Recent Production */}
+      {/* 2. Material Alerts & 3. Recent Production — Balanced Two-Column Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-        {/* Material Alerts — Top 3 most important low-stock / shortage materials */}
+        {/* Material Alerts */}
         <section className="lg:col-span-5 rounded-lg border border-slate-200 bg-white overflow-hidden">
           <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5">
             <h2 className="text-sm font-semibold text-slate-900">Material Alerts</h2>
-            <button
-              type="button"
-              onClick={() => onNavigate('inventory')}
-              className="text-xs font-medium text-blue-800 hover:underline"
-            >
-              View Inventory
-            </button>
+            <div className="flex items-center gap-3">
+              {hasMoreAlerts && (
+                <button
+                  type="button"
+                  onClick={onOpenLowStockInventory}
+                  className="text-xs font-medium text-amber-800 hover:underline cursor-pointer"
+                >
+                  View All ({allAlerts.length})
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onOpenLowStockInventory}
+                className="text-xs font-medium text-blue-800 hover:underline cursor-pointer"
+              >
+                View Inventory
+              </button>
+            </div>
           </div>
 
           {topMaterialAlerts.length === 0 ? (
-            <p className="px-4 py-6 text-center text-xs text-slate-500">
-              No low-stock or material shortage alerts.
+            <p className="px-4 py-4 text-center text-xs text-slate-500">
+              All raw and packaging materials are above reorder level.
             </p>
           ) : (
             <ul className="divide-y divide-slate-100">
               {topMaterialAlerts.map((item) => (
-                <li
-                  key={item.id}
-                  className="flex items-center justify-between gap-3 px-4 py-2.5 text-xs"
-                >
-                  <div className="min-w-0">
-                    <p className="font-medium text-slate-900 truncate">{item.name}</p>
-                    <p className="mt-0.5 text-[11px] text-slate-500 tabular-nums">
-                      Available: <span className="font-medium text-slate-700">{item.availableStock} {item.unit}</span>
-                      {' · '}
-                      Reorder: {item.reorderLevel} {item.unit}
-                    </p>
-                  </div>
-                  <span
-                    className={`shrink-0 inline-flex items-center rounded border px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap ${
-                      item.affectsProduction
-                        ? 'bg-rose-50 text-rose-700 border-rose-200'
-                        : 'bg-amber-50 text-amber-800 border-amber-200'
-                    }`}
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    onClick={() => onOpenMaterialDetail(item.id)}
+                    className="w-full flex items-center justify-between gap-2 px-4 py-2.5 text-left text-xs hover:bg-slate-50 active:bg-slate-100/70 transition-colors cursor-pointer"
                   >
-                    {item.affectsProduction ? 'Shortage' : 'Low Stock'}
-                  </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="font-medium text-slate-900 truncate">{item.name}</p>
+                      <p className="mt-0.5 text-[11px] text-slate-500 tabular-nums">
+                        Available:{' '}
+                        <span className="font-medium text-slate-800">
+                          {item.availableStock} {item.unit}
+                        </span>
+                        {' · '}
+                        Reorder: {item.reorderLevel} {item.unit}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {item.isLowStock !== false && (
+                        <span className="inline-flex items-center rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-800 whitespace-nowrap">
+                          Low Stock
+                        </span>
+                      )}
+                      {item.affectsProduction && (
+                        <span className="inline-flex items-center rounded border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[11px] font-medium text-rose-700 whitespace-nowrap">
+                          Shortage
+                        </span>
+                      )}
+                      <span className="inline-flex items-center text-[11px] font-medium text-blue-800">
+                        Details
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      </span>
+                    </div>
+                  </button>
                 </li>
               ))}
             </ul>
           )}
         </section>
 
-        {/* Recent Production — Latest 3 requests; clicking opens corresponding request */}
+        {/* Recent Production */}
         <section className="lg:col-span-7 rounded-lg border border-slate-200 bg-white overflow-hidden">
           <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5">
             <h2 className="text-sm font-semibold text-slate-900">Recent Production</h2>
             <button
               type="button"
-              onClick={() => onNavigate('requests')}
-              className="text-xs font-medium text-blue-800 hover:underline"
+              onClick={onOpenAllRequests}
+              className="text-xs font-medium text-blue-800 hover:underline cursor-pointer"
             >
               View All
             </button>
           </div>
 
           {latestRequests.length === 0 ? (
-            <p className="px-4 py-6 text-center text-xs text-slate-500">
+            <p className="px-4 py-4 text-center text-xs text-slate-500">
               No pending or recent production requests.
             </p>
           ) : (
@@ -163,7 +321,7 @@ export function SupervisorDashboardView({
                       }}
                       tabIndex={0}
                       role="button"
-                      className="cursor-pointer hover:bg-slate-50 transition-colors focus:bg-blue-50/50 focus:outline-none"
+                      className="cursor-pointer hover:bg-slate-50 active:bg-slate-100/70 transition-colors focus:bg-blue-50/50 focus:outline-none"
                     >
                       <td className="px-4 py-2.5 font-medium text-slate-900">{req.productName}</td>
                       <td className="px-4 py-2.5 font-mono text-slate-600">{req.requestNumber}</td>
