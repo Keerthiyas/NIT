@@ -419,13 +419,24 @@ export function initializeSchema(db: DatabaseSync): void {
       notes TEXT NOT NULL DEFAULT ''
     );
 
+    CREATE TABLE IF NOT EXISTS dispatch_items (
+      id TEXT PRIMARY KEY,
+      dispatch_id TEXT NOT NULL REFERENCES dispatches(id) ON DELETE CASCADE,
+      order_item_id TEXT,
+      product_id TEXT NOT NULL REFERENCES inventory_items(id),
+      dispatched_qty_scaled INTEGER NOT NULL CHECK(dispatched_qty_scaled > 0),
+      invoiced_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(invoiced_qty_scaled >= 0)
+    );
+
     CREATE TABLE IF NOT EXISTS invoices (
       id TEXT PRIMARY KEY,
       invoice_number TEXT NOT NULL UNIQUE,
       order_id TEXT NOT NULL REFERENCES orders(id),
       customer_id TEXT NOT NULL REFERENCES customers(id),
-      dispatch_id TEXT NOT NULL UNIQUE REFERENCES dispatches(id),
+      dispatch_id TEXT NOT NULL REFERENCES dispatches(id),
+      invoiced_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(invoiced_qty_scaled >= 0),
       invoice_date TEXT NOT NULL,
+      due_date TEXT NOT NULL DEFAULT '',
       supply_type TEXT NOT NULL CHECK(supply_type IN ('INTRA_STATE', 'INTER_STATE')),
       place_of_supply_state TEXT NOT NULL,
       taxable_amount_paise INTEGER NOT NULL CHECK(taxable_amount_paise >= 0),
@@ -435,9 +446,14 @@ export function initializeSchema(db: DatabaseSync): void {
       total_gst_paise INTEGER NOT NULL CHECK(total_gst_paise >= 0),
       total_amount_paise INTEGER NOT NULL CHECK(total_amount_paise >= 0),
       paid_amount_paise INTEGER NOT NULL DEFAULT 0 CHECK(paid_amount_paise >= 0),
-      payment_status TEXT NOT NULL CHECK(payment_status IN ('UNPAID', 'PARTIALLY_PAID', 'PAID')),
+      payment_status TEXT NOT NULL CHECK(payment_status IN ('UNPAID', 'PARTIALLY_PAID', 'PAID', 'CANCELLED')),
+      notes TEXT NOT NULL DEFAULT '',
+      idempotency_key TEXT UNIQUE,
       created_by TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      cancelled_by TEXT NOT NULL DEFAULT '',
+      cancelled_at TEXT NOT NULL DEFAULT '',
+      cancellation_reason TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS invoice_lines (
@@ -461,16 +477,30 @@ export function initializeSchema(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS payments (
       id TEXT PRIMARY KEY,
       payment_number TEXT NOT NULL UNIQUE,
-      invoice_id TEXT NOT NULL REFERENCES invoices(id),
+      invoice_id TEXT REFERENCES invoices(id),
       customer_id TEXT NOT NULL REFERENCES customers(id),
       payment_date TEXT NOT NULL,
       amount_paise INTEGER NOT NULL CHECK(amount_paise > 0),
+      unallocated_paise INTEGER NOT NULL DEFAULT 0 CHECK(unallocated_paise >= 0),
       payment_mode TEXT NOT NULL,
       reference_number TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'POSTED' CHECK(status IN ('POSTED', 'REVERSED')),
       recorded_by TEXT NOT NULL,
       notes TEXT NOT NULL DEFAULT '',
       idempotency_key TEXT UNIQUE,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      reversed_by TEXT NOT NULL DEFAULT '',
+      reversed_at TEXT NOT NULL DEFAULT '',
+      reversal_reason TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS payment_allocations (
+      id TEXT PRIMARY KEY,
+      payment_id TEXT NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
+      invoice_id TEXT NOT NULL REFERENCES invoices(id),
+      amount_paise INTEGER NOT NULL CHECK(amount_paise > 0),
+      created_at TEXT NOT NULL,
+      UNIQUE(payment_id, invoice_id)
     );
 
     CREATE TABLE IF NOT EXISTS audit_logs (
@@ -734,6 +764,129 @@ export function initializeSchema(db: DatabaseSync): void {
     FROM orders o
     JOIN inventory_items p ON p.id = o.product_id
     WHERE NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = o.id);
+  `);
+
+  // Safe migration for invoices (allow CANCELLED, non-unique dispatch_id for partial/corrected invoices, cancellation fields)
+  const invTableDef = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'invoices'`)
+    .get() as { sql: string } | undefined;
+  if (invTableDef && !invTableDef.sql.includes("'CANCELLED'")) {
+    db.exec(`PRAGMA foreign_keys = OFF;`);
+    db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE invoices_migrated (
+        id TEXT PRIMARY KEY,
+        invoice_number TEXT NOT NULL UNIQUE,
+        order_id TEXT NOT NULL REFERENCES orders(id),
+        customer_id TEXT NOT NULL REFERENCES customers(id),
+        dispatch_id TEXT NOT NULL REFERENCES dispatches(id),
+        invoiced_qty_scaled INTEGER NOT NULL DEFAULT 0 CHECK(invoiced_qty_scaled >= 0),
+        invoice_date TEXT NOT NULL,
+        due_date TEXT NOT NULL DEFAULT '',
+        supply_type TEXT NOT NULL CHECK(supply_type IN ('INTRA_STATE', 'INTER_STATE')),
+        place_of_supply_state TEXT NOT NULL,
+        taxable_amount_paise INTEGER NOT NULL CHECK(taxable_amount_paise >= 0),
+        cgst_amount_paise INTEGER NOT NULL DEFAULT 0 CHECK(cgst_amount_paise >= 0),
+        sgst_amount_paise INTEGER NOT NULL DEFAULT 0 CHECK(sgst_amount_paise >= 0),
+        igst_amount_paise INTEGER NOT NULL DEFAULT 0 CHECK(igst_amount_paise >= 0),
+        total_gst_paise INTEGER NOT NULL CHECK(total_gst_paise >= 0),
+        total_amount_paise INTEGER NOT NULL CHECK(total_amount_paise >= 0),
+        paid_amount_paise INTEGER NOT NULL DEFAULT 0 CHECK(paid_amount_paise >= 0),
+        payment_status TEXT NOT NULL CHECK(payment_status IN ('UNPAID', 'PARTIALLY_PAID', 'PAID', 'CANCELLED')),
+        notes TEXT NOT NULL DEFAULT '',
+        idempotency_key TEXT UNIQUE,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        cancelled_by TEXT NOT NULL DEFAULT '',
+        cancelled_at TEXT NOT NULL DEFAULT '',
+        cancellation_reason TEXT NOT NULL DEFAULT ''
+      );
+      INSERT INTO invoices_migrated (
+        id, invoice_number, order_id, customer_id, dispatch_id, invoiced_qty_scaled,
+        invoice_date, due_date, supply_type, place_of_supply_state, taxable_amount_paise,
+        cgst_amount_paise, sgst_amount_paise, igst_amount_paise, total_gst_paise, total_amount_paise,
+        paid_amount_paise, payment_status, created_by, created_at
+      )
+      SELECT
+        i.id, i.invoice_number, i.order_id, i.customer_id, i.dispatch_id,
+        COALESCE((SELECT SUM(il.quantity_scaled) FROM invoice_lines il WHERE il.invoice_id = i.id), 0),
+        i.invoice_date,
+        date(i.invoice_date, '+15 days'),
+        i.supply_type, i.place_of_supply_state, i.taxable_amount_paise,
+        i.cgst_amount_paise, i.sgst_amount_paise, i.igst_amount_paise, i.total_gst_paise, i.total_amount_paise,
+        i.paid_amount_paise, i.payment_status, i.created_by, i.created_at
+      FROM invoices i;
+      DROP TABLE invoices;
+      ALTER TABLE invoices_migrated RENAME TO invoices;
+      COMMIT;
+    `);
+    db.exec(`PRAGMA foreign_keys = ON;`);
+  }
+
+  // Safe migration for payments (nullable invoice_id, reversal fields, unallocated_paise)
+  const payTableDef = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'payments'`)
+    .get() as { sql: string } | undefined;
+  if (payTableDef && !payTableDef.sql.includes("'REVERSED'")) {
+    db.exec(`PRAGMA foreign_keys = OFF;`);
+    db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE payments_migrated (
+        id TEXT PRIMARY KEY,
+        payment_number TEXT NOT NULL UNIQUE,
+        invoice_id TEXT REFERENCES invoices(id),
+        customer_id TEXT NOT NULL REFERENCES customers(id),
+        payment_date TEXT NOT NULL,
+        amount_paise INTEGER NOT NULL CHECK(amount_paise > 0),
+        unallocated_paise INTEGER NOT NULL DEFAULT 0 CHECK(unallocated_paise >= 0),
+        payment_mode TEXT NOT NULL,
+        reference_number TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'POSTED' CHECK(status IN ('POSTED', 'REVERSED')),
+        recorded_by TEXT NOT NULL,
+        notes TEXT NOT NULL DEFAULT '',
+        idempotency_key TEXT UNIQUE,
+        created_at TEXT NOT NULL,
+        reversed_by TEXT NOT NULL DEFAULT '',
+        reversed_at TEXT NOT NULL DEFAULT '',
+        reversal_reason TEXT NOT NULL DEFAULT ''
+      );
+      INSERT INTO payments_migrated (
+        id, payment_number, invoice_id, customer_id, payment_date, amount_paise,
+        unallocated_paise, payment_mode, reference_number, status, recorded_by, notes, idempotency_key, created_at
+      )
+      SELECT
+        id, payment_number, invoice_id, customer_id, payment_date, amount_paise,
+        0, payment_mode, reference_number, 'POSTED', recorded_by, notes, idempotency_key, created_at
+      FROM payments;
+      DROP TABLE payments;
+      ALTER TABLE payments_migrated RENAME TO payments;
+      COMMIT;
+    `);
+    db.exec(`PRAGMA foreign_keys = ON;`);
+  }
+
+  // Backfill payment_allocations for any existing invoice-linked payments
+  db.exec(`
+    INSERT OR IGNORE INTO payment_allocations (id, payment_id, invoice_id, amount_paise, created_at)
+    SELECT 'pal-' || p.id, p.id, p.invoice_id, p.amount_paise, p.created_at
+    FROM payments p
+    WHERE p.invoice_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM payment_allocations pa WHERE pa.payment_id = p.id);
+  `);
+
+  // Backfill dispatch_items for legacy single-item dispatches
+  db.exec(`
+    INSERT OR IGNORE INTO dispatch_items (id, dispatch_id, order_item_id, product_id, dispatched_qty_scaled, invoiced_qty_scaled)
+    SELECT
+      'di-' || d.id,
+      d.id,
+      (SELECT oi.id FROM order_items oi WHERE oi.order_id = d.order_id LIMIT 1),
+      o.product_id,
+      d.dispatched_qty_scaled,
+      d.invoiced_qty_scaled
+    FROM dispatches d
+    JOIN orders o ON o.id = d.order_id
+    WHERE NOT EXISTS (SELECT 1 FROM dispatch_items di WHERE di.dispatch_id = d.id);
   `);
 }
 

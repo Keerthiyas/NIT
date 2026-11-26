@@ -16,11 +16,12 @@ function formatInr(amount: number): string {
 
 const PAYMENT_STATUS_BADGE: Record<
   Invoice['paymentStatus'],
-  { label: string; tone: 'danger' | 'warning' | 'success' }
+  { label: string; tone: 'danger' | 'warning' | 'success' | 'neutral' }
 > = {
   UNPAID: { label: 'Unpaid', tone: 'danger' },
   PARTIALLY_PAID: { label: 'Partially Paid', tone: 'warning' },
   PAID: { label: 'Paid', tone: 'success' },
+  CANCELLED: { label: 'Cancelled', tone: 'neutral' },
 };
 
 export function BillingPaymentsView() {

@@ -21,6 +21,13 @@ export type SupervisorNavSection =
   | 'execution'
   | 'history';
 
+export type AccountantNavSection =
+  | 'dashboard'
+  | 'invoices'
+  | 'payments'
+  | 'receivables'
+  | 'reports';
+
 export interface AuthUser {
   id: string;
   username: string;
@@ -602,6 +609,7 @@ export interface DispatchRecord {
   gstRate: number;
   dispatchedQuantity: number;
   invoicedQuantity: number;
+  remainingQuantity?: number;
   isInvoiced: boolean;
   invoiceId?: string;
   invoiceNumber?: string;
@@ -629,11 +637,21 @@ export interface InvoicePayment {
   customerName?: string;
   paymentDate: string;
   amount: number;
+  unallocatedAmount?: number;
   paymentMode: string;
   referenceNumber: string;
+  status?: 'POSTED' | 'REVERSED';
   recordedBy: string;
   notes?: string;
   createdAt: string;
+  reversedBy?: string;
+  reversedAt?: string;
+  reversalReason?: string;
+  allocations?: Array<{
+    invoiceId: string;
+    invoiceNumber: string;
+    amount: number;
+  }>;
 }
 
 export interface Invoice {
@@ -643,6 +661,7 @@ export interface Invoice {
   orderNumber: string;
   dispatchId: string;
   dispatchNumber: string;
+  invoicedQuantity?: number;
   customerId: string;
   customerName: string;
   customerCode: string;
@@ -652,6 +671,7 @@ export interface Invoice {
   customerState: string;
   customerStateCode: string;
   invoiceDate: string;
+  dueDate?: string;
   supplyType: 'INTRA_STATE' | 'INTER_STATE';
   placeOfSupplyState: string;
   taxableAmount: number;
@@ -662,9 +682,13 @@ export interface Invoice {
   totalAmount: number;
   amountReceived: number;
   outstandingBalance: number;
-  paymentStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
+  paymentStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' | 'CANCELLED';
+  notes?: string;
   createdBy: string;
   createdAt: string;
+  cancelledBy?: string;
+  cancelledAt?: string;
+  cancellationReason?: string;
   businessProfile: BusinessProfile;
   lines: Array<{
     id: string;
@@ -690,6 +714,127 @@ export interface BillingWorkspaceData {
   invoices: Invoice[];
   payments: InvoicePayment[];
   dispatchesReadyForInvoicing: DispatchRecord[];
+}
+
+export interface AccountantDashboardData {
+  pendingInvoicesCount: number;
+  totalInvoicedAmount: number;
+  amountCollected: number;
+  outstandingAmount: number;
+  pendingDispatches: DispatchRecord[];
+  recentPayments: InvoicePayment[];
+}
+
+export interface DispatchInvoicePreview {
+  businessProfile: BusinessProfile;
+  dispatchId: string;
+  dispatchNumber: string;
+  dispatchedAt: string;
+  orderId: string;
+  orderNumber: string;
+  customerId: string;
+  customerName: string;
+  customerCode: string;
+  customerGstin: string;
+  billingAddress: string;
+  deliveryAddress: string;
+  customerState: string;
+  customerStateCode: string;
+  supplyType: 'INTRA_STATE' | 'INTER_STATE';
+  placeOfSupplyState: string;
+  uninvoicedQuantity: number;
+  invoiceQuantity: number;
+  subtotal: number;
+  taxableAmount: number;
+  cgstAmount: number;
+  sgstAmount: number;
+  igstAmount: number;
+  totalGstAmount: number;
+  totalAmount: number;
+  lines: Array<{
+    productId: string;
+    productName: string;
+    sku: string;
+    hsnCode: string;
+    unit: string;
+    quantity: number;
+    unitPrice: number;
+    gstRate: number;
+    taxableAmount: number;
+    cgstAmount: number;
+    sgstAmount: number;
+    igstAmount: number;
+    taxAmount: number;
+    totalAmount: number;
+  }>;
+}
+
+export interface CustomerReceivableSummary {
+  customerId: string;
+  customerCode: string;
+  customerName: string;
+  contactPerson: string;
+  phone: string;
+  email: string;
+  customerGstin: string;
+  billingAddress: string;
+  state: string;
+  totalInvoiced: number;
+  totalPaid: number;
+  outstandingAmount: number;
+  overdueAmount: number;
+  oldestUnpaidInvoiceId?: string;
+  oldestUnpaidInvoiceNumber?: string;
+  oldestUnpaidInvoiceDate?: string;
+  status: 'SETTLED' | 'OVERDUE' | 'PARTIALLY_PAID' | 'OUTSTANDING';
+  invoices: Invoice[];
+  payments: InvoicePayment[];
+}
+
+export interface FinancialReportsData {
+  salesAndInvoices: {
+    invoiceCount: number;
+    activeInvoiceCount: number;
+    taxableTotal: number;
+    gstTotal: number;
+    grandTotal: number;
+    collectedTotal: number;
+    outstandingTotal: number;
+    rows: Invoice[];
+  };
+  gstSummary: {
+    taxableTotal: number;
+    cgstTotal: number;
+    sgstTotal: number;
+    igstTotal: number;
+    totalGst: number;
+    rows: Array<{
+      gstRate: number;
+      supplyType: 'INTRA_STATE' | 'INTER_STATE';
+      invoiceCount: number;
+      taxableAmount: number;
+      cgstAmount: number;
+      sgstAmount: number;
+      igstAmount: number;
+      totalGstAmount: number;
+    }>;
+  };
+  paymentCollection: {
+    totalCollected: number;
+    paymentCount: number;
+    byMode: Array<{
+      paymentMode: string;
+      count: number;
+      totalAmount: number;
+    }>;
+    rows: InvoicePayment[];
+  };
+  outstandingReceivables: {
+    totalOutstanding: number;
+    totalOverdue: number;
+    customerCount: number;
+    rows: CustomerReceivableSummary[];
+  };
 }
 
 // --- Management Master Data ---

@@ -2293,12 +2293,12 @@ export function listDispatches(db: DatabaseSync) {
     .prepare(
       `SELECT d.*, o.order_number, o.customer_id, c.name AS customer_name, c.state AS customer_state,
               p.id AS product_id, p.name AS product_name, p.unit, p.selling_price_paise, p.gst_rate_bps,
-              inv.id AS invoice_id, inv.invoice_number
+              (SELECT inv.id FROM invoices inv WHERE inv.dispatch_id = d.id AND inv.payment_status != 'CANCELLED' ORDER BY inv.created_at DESC LIMIT 1) AS invoice_id,
+              (SELECT inv.invoice_number FROM invoices inv WHERE inv.dispatch_id = d.id AND inv.payment_status != 'CANCELLED' ORDER BY inv.created_at DESC LIMIT 1) AS invoice_number
        FROM dispatches d
        JOIN orders o ON o.id = d.order_id
        JOIN customers c ON c.id = o.customer_id
        JOIN inventory_items p ON p.id = o.product_id
-       LEFT JOIN invoices inv ON inv.dispatch_id = d.id
        ORDER BY d.dispatched_at DESC`
     )
     .all() as Array<{
@@ -2323,28 +2323,32 @@ export function listDispatches(db: DatabaseSync) {
     notes: string;
   }>;
 
-  return rows.map((r) => ({
-    id: r.id,
-    dispatchNumber: r.dispatch_number,
-    orderId: r.order_id,
-    orderNumber: r.order_number,
-    customerId: r.customer_id,
-    customerName: r.customer_name,
-    customerState: r.customer_state,
-    productId: r.product_id,
-    productName: r.product_name,
-    unit: r.unit,
-    unitPrice: fromPaise(r.selling_price_paise),
-    gstRate: fromGstBps(r.gst_rate_bps),
-    dispatchedQuantity: fromScaledQty(r.dispatched_qty_scaled),
-    invoicedQuantity: fromScaledQty(r.invoiced_qty_scaled),
-    isInvoiced: Boolean(r.invoice_id),
-    invoiceId: r.invoice_id || undefined,
-    invoiceNumber: r.invoice_number || undefined,
-    dispatchedAt: r.dispatched_at,
-    dispatchedBy: r.dispatched_by,
-    notes: r.notes || undefined,
-  }));
+  return rows.map((r) => {
+    const remainingScaled = Math.max(0, r.dispatched_qty_scaled - r.invoiced_qty_scaled);
+    return {
+      id: r.id,
+      dispatchNumber: r.dispatch_number,
+      orderId: r.order_id,
+      orderNumber: r.order_number,
+      customerId: r.customer_id,
+      customerName: r.customer_name,
+      customerState: r.customer_state,
+      productId: r.product_id,
+      productName: r.product_name,
+      unit: r.unit,
+      unitPrice: fromPaise(r.selling_price_paise),
+      gstRate: fromGstBps(r.gst_rate_bps),
+      dispatchedQuantity: fromScaledQty(r.dispatched_qty_scaled),
+      invoicedQuantity: fromScaledQty(r.invoiced_qty_scaled),
+      remainingQuantity: fromScaledQty(remainingScaled),
+      isInvoiced: remainingScaled === 0,
+      invoiceId: r.invoice_id || undefined,
+      invoiceNumber: r.invoice_number || undefined,
+      dispatchedAt: r.dispatched_at,
+      dispatchedBy: r.dispatched_by,
+      notes: r.notes || undefined,
+    };
+  });
 }
 
 export function recordDispatch(
@@ -2412,6 +2416,12 @@ export function recordDispatch(
       dispatched_qty_scaled: number;
     }>;
 
+    const dispatchLineInserts: Array<{
+      orderItemId: string | null;
+      productId: string;
+      qtyScaled: number;
+    }> = [];
+
     if (orderItems.length > 1) {
       let remainingToAllocate = qtyScaled;
       for (const item of orderItems) {
@@ -2434,6 +2444,11 @@ export function recordDispatch(
         db.prepare(
           `UPDATE order_items SET dispatched_qty_scaled = dispatched_qty_scaled + ? WHERE id = ?`
         ).run(itemDispatch, item.id);
+        dispatchLineInserts.push({
+          orderItemId: item.id,
+          productId: item.product_id,
+          qtyScaled: itemDispatch,
+        });
         remainingToAllocate -= itemDispatch;
       }
     } else {
@@ -2454,6 +2469,11 @@ export function recordDispatch(
           `UPDATE order_items SET dispatched_qty_scaled = dispatched_qty_scaled + ? WHERE id = ?`
         ).run(qtyScaled, orderItems[0].id);
       }
+      dispatchLineInserts.push({
+        orderItemId: orderItems[0]?.id ?? null,
+        productId: order.product_id,
+        qtyScaled,
+      });
     }
 
     db.prepare(
@@ -2469,6 +2489,14 @@ export function recordDispatch(
       input.idempotencyKey || null,
       input.notes?.trim() || ''
     );
+
+    const insDispItem = db.prepare(
+      `INSERT INTO dispatch_items (id, dispatch_id, order_item_id, product_id, dispatched_qty_scaled, invoiced_qty_scaled)
+       VALUES (?, ?, ?, ?, ?, 0)`
+    );
+    for (const dl of dispatchLineInserts) {
+      insDispItem.run(uid('di'), dispatchId, dl.orderItemId, dl.productId, dl.qtyScaled);
+    }
 
     const newDispatchedTotal = order.dispatched_qty_scaled + qtyScaled;
     const nextOrderStatus =
@@ -2506,6 +2534,48 @@ export function recordDispatch(
   });
 }
 
+export function resolveGstSupplyType(params: {
+  customerState: string;
+  customerStateCode?: string;
+  customerGstin?: string;
+  placeOfSupplyState?: string;
+}): { supplyType: 'INTRA_STATE' | 'INTER_STATE'; placeOfSupplyState: string; placeOfSupplyCode: string } {
+  const supplierStateCode =
+    BUSINESS_PROFILE.gstin.slice(0, 2) || BUSINESS_PROFILE.stateCode || '33';
+  const targetState = (params.placeOfSupplyState || params.customerState || '').trim();
+  const mappedCodeFromState =
+    Object.entries(INDIAN_STATE_CODES).find(
+      ([name]) => name.toLowerCase() === targetState.toLowerCase()
+    )?.[1] || '';
+
+  const gstinPrefix =
+    params.customerGstin && params.customerGstin.trim().length >= 2
+      ? params.customerGstin.trim().slice(0, 2)
+      : '';
+
+  const effectiveCode =
+    (params.placeOfSupplyState ? mappedCodeFromState : '') ||
+    (gstinPrefix && /^\d{2}$/.test(gstinPrefix) ? gstinPrefix : '') ||
+    (params.customerStateCode && params.customerStateCode !== '99' ? params.customerStateCode : '') ||
+    mappedCodeFromState ||
+    '99';
+
+  const supplyType: 'INTRA_STATE' | 'INTER_STATE' =
+    effectiveCode !== '99'
+      ? effectiveCode === supplierStateCode
+        ? 'INTRA_STATE'
+        : 'INTER_STATE'
+      : targetState.toLowerCase() === BUSINESS_PROFILE.state.toLowerCase()
+        ? 'INTRA_STATE'
+        : 'INTER_STATE';
+
+  return {
+    supplyType,
+    placeOfSupplyState: targetState || BUSINESS_PROFILE.state,
+    placeOfSupplyCode: effectiveCode,
+  };
+}
+
 export function listInvoicesAndPayments(db: DatabaseSync) {
   const invoices = db
     .prepare(
@@ -2533,7 +2603,9 @@ export function listInvoicesAndPayments(db: DatabaseSync) {
     customer_state_code: string;
     dispatch_id: string;
     dispatch_number: string;
+    invoiced_qty_scaled: number;
     invoice_date: string;
+    due_date: string;
     supply_type: 'INTRA_STATE' | 'INTER_STATE';
     place_of_supply_state: string;
     taxable_amount_paise: number;
@@ -2543,14 +2615,28 @@ export function listInvoicesAndPayments(db: DatabaseSync) {
     total_gst_paise: number;
     total_amount_paise: number;
     paid_amount_paise: number;
-    payment_status: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
+    payment_status: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' | 'CANCELLED';
+    notes: string;
     created_by: string;
     created_at: string;
+    cancelled_by: string;
+    cancelled_at: string;
+    cancellation_reason: string;
   }>;
 
   const lineStmt = db.prepare(`SELECT * FROM invoice_lines WHERE invoice_id = ?`);
   const payStmt = db.prepare(
-    `SELECT * FROM payments WHERE invoice_id = ? ORDER BY payment_date DESC, created_at DESC`
+    `SELECT p.*, COALESCE(pa.amount_paise, p.amount_paise) AS allocated_paise
+     FROM payments p
+     LEFT JOIN payment_allocations pa ON pa.payment_id = p.id AND pa.invoice_id = ?
+     WHERE (pa.invoice_id = ? OR p.invoice_id = ?) AND COALESCE(p.status, 'POSTED') = 'POSTED'
+     ORDER BY p.payment_date DESC, p.created_at DESC`
+  );
+  const allocStmt = db.prepare(
+    `SELECT pa.invoice_id, pa.amount_paise, inv.invoice_number
+     FROM payment_allocations pa
+     JOIN invoices inv ON inv.id = pa.invoice_id
+     WHERE pa.payment_id = ?`
   );
 
   const mappedInvoices = invoices.map((inv) => {
@@ -2571,12 +2657,12 @@ export function listInvoicesAndPayments(db: DatabaseSync) {
       total_paise: number;
     }>;
 
-    const payments = payStmt.all(inv.id) as Array<{
+    const payments = payStmt.all(inv.id, inv.id, inv.id) as Array<{
       id: string;
       payment_number: string;
-      invoice_id: string;
+      invoice_id: string | null;
       payment_date: string;
-      amount_paise: number;
+      allocated_paise: number;
       payment_mode: string;
       reference_number: string;
       recorded_by: string;
@@ -2584,7 +2670,10 @@ export function listInvoicesAndPayments(db: DatabaseSync) {
       created_at: string;
     }>;
 
-    const outstandingPaise = Math.max(0, inv.total_amount_paise - inv.paid_amount_paise);
+    const outstandingPaise =
+      inv.payment_status === 'CANCELLED'
+        ? 0
+        : Math.max(0, inv.total_amount_paise - inv.paid_amount_paise);
 
     return {
       id: inv.id,
@@ -2593,6 +2682,11 @@ export function listInvoicesAndPayments(db: DatabaseSync) {
       orderNumber: inv.order_number,
       dispatchId: inv.dispatch_id,
       dispatchNumber: inv.dispatch_number,
+      invoicedQuantity: fromScaledQty(
+        inv.invoiced_qty_scaled > 0
+          ? inv.invoiced_qty_scaled
+          : lines.reduce((s, l) => s + l.quantity_scaled, 0)
+      ),
       customerId: inv.customer_id,
       customerName: inv.customer_name,
       customerCode: inv.customer_code,
@@ -2602,6 +2696,7 @@ export function listInvoicesAndPayments(db: DatabaseSync) {
       customerState: inv.customer_state,
       customerStateCode: inv.customer_state_code,
       invoiceDate: inv.invoice_date,
+      dueDate: inv.due_date || undefined,
       supplyType: inv.supply_type,
       placeOfSupplyState: inv.place_of_supply_state,
       taxableAmount: fromPaise(inv.taxable_amount_paise),
@@ -2613,8 +2708,12 @@ export function listInvoicesAndPayments(db: DatabaseSync) {
       amountReceived: fromPaise(inv.paid_amount_paise),
       outstandingBalance: fromPaise(outstandingPaise),
       paymentStatus: inv.payment_status,
+      notes: inv.notes || undefined,
       createdBy: inv.created_by,
       createdAt: inv.created_at,
+      cancelledBy: inv.cancelled_by || undefined,
+      cancelledAt: inv.cancelled_at || undefined,
+      cancellationReason: inv.cancellation_reason || undefined,
       businessProfile: BUSINESS_PROFILE,
       lines: lines.map((l) => ({
         id: l.id,
@@ -2635,9 +2734,9 @@ export function listInvoicesAndPayments(db: DatabaseSync) {
       payments: payments.map((p) => ({
         id: p.id,
         paymentNumber: p.payment_number,
-        invoiceId: p.invoice_id,
+        invoiceId: inv.id,
         paymentDate: p.payment_date,
-        amount: fromPaise(p.amount_paise),
+        amount: fromPaise(p.allocated_paise),
         paymentMode: p.payment_mode,
         referenceNumber: p.reference_number,
         recordedBy: p.recorded_by,
@@ -2651,208 +2750,331 @@ export function listInvoicesAndPayments(db: DatabaseSync) {
     .prepare(
       `SELECT p.*, inv.invoice_number, c.name AS customer_name
        FROM payments p
-       JOIN invoices inv ON inv.id = p.invoice_id
+       LEFT JOIN invoices inv ON inv.id = p.invoice_id
        JOIN customers c ON c.id = p.customer_id
        ORDER BY p.payment_date DESC, p.created_at DESC`
     )
     .all() as Array<{
     id: string;
     payment_number: string;
-    invoice_id: string;
-    invoice_number: string;
+    invoice_id: string | null;
+    invoice_number: string | null;
     customer_id: string;
     customer_name: string;
     payment_date: string;
     amount_paise: number;
+    unallocated_paise: number;
     payment_mode: string;
     reference_number: string;
+    status: 'POSTED' | 'REVERSED';
     recorded_by: string;
     notes: string;
     created_at: string;
+    reversed_by: string;
+    reversed_at: string;
+    reversal_reason: string;
   }>;
 
   return {
     businessProfile: BUSINESS_PROFILE,
     invoices: mappedInvoices,
-    payments: allPayments.map((p) => ({
-      id: p.id,
-      paymentNumber: p.payment_number,
-      invoiceId: p.invoice_id,
-      invoiceNumber: p.invoice_number,
-      customerId: p.customer_id,
-      customerName: p.customer_name,
-      paymentDate: p.payment_date,
-      amount: fromPaise(p.amount_paise),
-      paymentMode: p.payment_mode,
-      referenceNumber: p.reference_number,
-      recordedBy: p.recorded_by,
-      notes: p.notes || undefined,
-      createdAt: p.created_at,
-    })),
+    payments: allPayments.map((p) => {
+      const allocs = allocStmt.all(p.id) as Array<{
+        invoice_id: string;
+        amount_paise: number;
+        invoice_number: string;
+      }>;
+      const invoiceNumbers =
+        allocs.length > 0
+          ? allocs.map((a) => a.invoice_number).join(', ')
+          : p.invoice_number || '';
+      return {
+        id: p.id,
+        paymentNumber: p.payment_number,
+        invoiceId: p.invoice_id || allocs[0]?.invoice_id || '',
+        invoiceNumber: invoiceNumbers,
+        customerId: p.customer_id,
+        customerName: p.customer_name,
+        paymentDate: p.payment_date,
+        amount: fromPaise(p.amount_paise),
+        unallocatedAmount: fromPaise(p.unallocated_paise ?? 0),
+        paymentMode: p.payment_mode,
+        referenceNumber: p.reference_number,
+        status: p.status || 'POSTED',
+        recordedBy: p.recorded_by,
+        notes: p.notes || undefined,
+        createdAt: p.created_at,
+        reversedBy: p.reversed_by || undefined,
+        reversedAt: p.reversed_at || undefined,
+        reversalReason: p.reversal_reason || undefined,
+        allocations: allocs.map((a) => ({
+          invoiceId: a.invoice_id,
+          invoiceNumber: a.invoice_number,
+          amount: fromPaise(a.amount_paise),
+        })),
+      };
+    }),
     dispatchesReadyForInvoicing: listDispatches(db).filter((d) => !d.isInvoiced),
   };
 }
 
 /**
- * Accountant ONLY: Generate GST invoice strictly from actual dispatched quantity.
+ * Accountant ONLY: Compute invoice lines & GST breakdown for a dispatch without creating the invoice.
+ */
+export function buildDispatchInvoiceComputation(
+  db: DatabaseSync,
+  dispatchId: string,
+  options?: { quantity?: number; placeOfSupplyState?: string }
+) {
+  const dispatch = db
+    .prepare(
+      `SELECT d.*, o.customer_id, o.product_id, o.order_number,
+              c.name AS customer_name, c.code AS customer_code, c.gstin AS customer_gstin,
+              c.billing_address, c.delivery_address,
+              c.state AS customer_state, c.state_code AS customer_state_code,
+              p.name AS product_name, p.sku, p.hsn_code, p.unit, p.selling_price_paise, p.gst_rate_bps
+       FROM dispatches d
+       JOIN orders o ON o.id = d.order_id
+       JOIN customers c ON c.id = o.customer_id
+       JOIN inventory_items p ON p.id = o.product_id
+       WHERE d.id = ?`
+    )
+    .get(dispatchId) as
+    | {
+        id: string;
+        dispatch_number: string;
+        order_id: string;
+        order_number: string;
+        customer_id: string;
+        customer_name: string;
+        customer_code: string;
+        customer_gstin: string;
+        billing_address: string;
+        delivery_address: string;
+        customer_state: string;
+        customer_state_code: string;
+        product_id: string;
+        product_name: string;
+        sku: string;
+        hsn_code: string;
+        unit: string;
+        selling_price_paise: number;
+        gst_rate_bps: number;
+        dispatched_qty_scaled: number;
+        invoiced_qty_scaled: number;
+        dispatched_at: string;
+      }
+    | undefined;
+
+  if (!dispatch) {
+    throw new HttpError(404, `Dispatch ${dispatchId} not found.`);
+  }
+
+  const remainingScaled = Math.max(0, dispatch.dispatched_qty_scaled - dispatch.invoiced_qty_scaled);
+  if (remainingScaled <= 0) {
+    throw new HttpError(
+      409,
+      `Dispatch ${dispatch.dispatch_number} has already been fully invoiced.`
+    );
+  }
+
+  const requestedInvoiceScaled =
+    options?.quantity !== undefined ? toScaledQty(options.quantity) : remainingScaled;
+  if (requestedInvoiceScaled <= 0 || requestedInvoiceScaled > remainingScaled) {
+    throw new HttpError(
+      400,
+      `Invoice quantity must be between 0 and uninvoiced dispatch quantity (${fromScaledQty(remainingScaled)}).`
+    );
+  }
+
+  const pos = resolveGstSupplyType({
+    customerState: dispatch.customer_state,
+    customerStateCode: dispatch.customer_state_code,
+    customerGstin: dispatch.customer_gstin,
+    placeOfSupplyState: options?.placeOfSupplyState,
+  });
+
+  const dispatchLines = db
+    .prepare(
+      `SELECT di.id, di.product_id, di.dispatched_qty_scaled, di.invoiced_qty_scaled,
+              p.name AS product_name, p.sku, p.hsn_code, p.unit, p.selling_price_paise, p.gst_rate_bps
+       FROM dispatch_items di
+       JOIN inventory_items p ON p.id = di.product_id
+       WHERE di.dispatch_id = ? AND (di.dispatched_qty_scaled - di.invoiced_qty_scaled) > 0
+       ORDER BY di.rowid ASC`
+    )
+    .all(dispatch.id) as Array<{
+    id: string;
+    product_id: string;
+    dispatched_qty_scaled: number;
+    invoiced_qty_scaled: number;
+    product_name: string;
+    sku: string;
+    hsn_code: string;
+    unit: string;
+    selling_price_paise: number;
+    gst_rate_bps: number;
+  }>;
+
+  const lineSpecs: Array<{
+    dispatchItemId?: string;
+    productId: string;
+    productName: string;
+    sku: string;
+    hsnCode: string;
+    unit: string;
+    qtyScaled: number;
+    unitPricePaise: number;
+    gstRateBps: number;
+    taxablePaise: number;
+    cgstPaise: number;
+    sgstPaise: number;
+    igstPaise: number;
+    totalGstPaise: number;
+    totalPaise: number;
+  }> = [];
+
+  if (dispatchLines.length > 0) {
+    let remainingToAllocate = requestedInvoiceScaled;
+    for (const dl of dispatchLines) {
+      if (remainingToAllocate <= 0) break;
+      const lineRem = dl.dispatched_qty_scaled - dl.invoiced_qty_scaled;
+      if (lineRem <= 0) continue;
+      const takeScaled = Math.min(remainingToAllocate, lineRem);
+      const taxable = calcTaxablePaise(takeScaled, dl.selling_price_paise);
+      const gstLine = calcGstPaise(taxable, dl.gst_rate_bps, pos.supplyType);
+      lineSpecs.push({
+        dispatchItemId: dl.id,
+        productId: dl.product_id,
+        productName: dl.product_name,
+        sku: dl.sku,
+        hsnCode: dl.hsn_code,
+        unit: dl.unit,
+        qtyScaled: takeScaled,
+        unitPricePaise: dl.selling_price_paise,
+        gstRateBps: dl.gst_rate_bps,
+        taxablePaise: taxable,
+        ...gstLine,
+        totalPaise: taxable + gstLine.totalGstPaise,
+      });
+      remainingToAllocate -= takeScaled;
+    }
+  } else {
+    const taxable = calcTaxablePaise(requestedInvoiceScaled, dispatch.selling_price_paise);
+    const gstLine = calcGstPaise(taxable, dispatch.gst_rate_bps, pos.supplyType);
+    lineSpecs.push({
+      productId: dispatch.product_id,
+      productName: dispatch.product_name,
+      sku: dispatch.sku,
+      hsnCode: dispatch.hsn_code,
+      unit: dispatch.unit,
+      qtyScaled: requestedInvoiceScaled,
+      unitPricePaise: dispatch.selling_price_paise,
+      gstRateBps: dispatch.gst_rate_bps,
+      taxablePaise: taxable,
+      ...gstLine,
+      totalPaise: taxable + gstLine.totalGstPaise,
+    });
+  }
+
+  const taxablePaise = lineSpecs.reduce((s, l) => s + l.taxablePaise, 0);
+  const cgstTotalPaise = lineSpecs.reduce((s, l) => s + l.cgstPaise, 0);
+  const sgstTotalPaise = lineSpecs.reduce((s, l) => s + l.sgstPaise, 0);
+  const igstTotalPaise = lineSpecs.reduce((s, l) => s + l.igstPaise, 0);
+  const totalGstPaise = cgstTotalPaise + sgstTotalPaise + igstTotalPaise;
+  const totalPaise = taxablePaise + totalGstPaise;
+
+  return {
+    dispatch,
+    pos,
+    remainingScaled,
+    requestedInvoiceScaled,
+    lineSpecs,
+    taxablePaise,
+    cgstTotalPaise,
+    sgstTotalPaise,
+    igstTotalPaise,
+    totalGstPaise,
+    totalPaise,
+  };
+}
+
+/**
+ * Accountant ONLY: Generate GST invoice strictly from uninvoiced dispatched quantity.
  */
 export function createInvoiceFromDispatchByAccountant(
   db: DatabaseSync,
   actor: AuthUser,
-  input: { dispatchId: string }
+  input: {
+    dispatchId: string;
+    quantity?: number;
+    placeOfSupplyState?: string;
+    dueDate?: string;
+    notes?: string;
+    idempotencyKey?: string;
+  }
 ) {
   requireRole(actor, ['ACCOUNTANT']);
 
   return runInTransaction(db, () => {
-    const dispatch = db
-      .prepare(
-        `SELECT d.*, o.customer_id, o.product_id, o.order_number,
-                c.state AS customer_state, c.state_code AS customer_state_code,
-                p.name AS product_name, p.sku, p.hsn_code, p.unit, p.selling_price_paise, p.gst_rate_bps
-         FROM dispatches d
-         JOIN orders o ON o.id = d.order_id
-         JOIN customers c ON c.id = o.customer_id
-         JOIN inventory_items p ON p.id = o.product_id
-         WHERE d.id = ?`
-      )
-      .get(input.dispatchId) as
-      | {
-          id: string;
-          dispatch_number: string;
-          order_id: string;
-          order_number: string;
-          customer_id: string;
-          customer_state: string;
-          customer_state_code: string;
-          product_id: string;
-          product_name: string;
-          sku: string;
-          hsn_code: string;
-          unit: string;
-          selling_price_paise: number;
-          gst_rate_bps: number;
-          dispatched_qty_scaled: number;
-        }
-      | undefined;
-
-    if (!dispatch) {
-      throw new HttpError(404, `Dispatch ${input.dispatchId} not found.`);
-    }
-    if (dispatch.dispatched_qty_scaled <= 0) {
-      throw new HttpError(400, 'Cannot generate invoice for unfulfilled or zero-dispatch quantities.');
+    if (input.idempotencyKey) {
+      const dupKey = db
+        .prepare(`SELECT id, invoice_number FROM invoices WHERE idempotency_key = ?`)
+        .get(input.idempotencyKey) as { id: string; invoice_number: string } | undefined;
+      if (dupKey) {
+        return { id: dupKey.id, invoiceNumber: dupKey.invoice_number, deduplicated: true };
+      }
     }
 
-    const existingInv = db
-      .prepare(`SELECT id, invoice_number FROM invoices WHERE dispatch_id = ?`)
-      .get(dispatch.id) as { id: string; invoice_number: string } | undefined;
-    if (existingInv) {
-      throw new HttpError(
-        409,
-        `Invoice ${existingInv.invoice_number} is already generated for dispatch ${dispatch.dispatch_number}.`
-      );
-    }
-
-    const supplyType: 'INTRA_STATE' | 'INTER_STATE' =
-      dispatch.customer_state.trim().toLowerCase() === 'tamil nadu' ||
-      dispatch.customer_state_code === '33'
-        ? 'INTRA_STATE'
-        : 'INTER_STATE';
-
-    const orderItems = db
-      .prepare(
-        `SELECT oi.product_id, oi.product_name, oi.sku, oi.unit, oi.unit_price_paise, oi.gst_rate_bps,
-                oi.dispatched_qty_scaled, p.hsn_code
-         FROM order_items oi
-         JOIN inventory_items p ON p.id = oi.product_id
-         WHERE oi.order_id = ? AND oi.dispatched_qty_scaled > 0
-         ORDER BY oi.rowid ASC`
-      )
-      .all(dispatch.order_id) as Array<{
-      product_id: string;
-      product_name: string;
-      sku: string;
-      unit: string;
-      unit_price_paise: number;
-      gst_rate_bps: number;
-      dispatched_qty_scaled: number;
-      hsn_code: string;
-    }>;
-
-    const lineSpecs =
-      orderItems.length > 1
-        ? orderItems.map((it) => {
-            const taxable = calcTaxablePaise(it.dispatched_qty_scaled, it.unit_price_paise);
-            const gstLine = calcGstPaise(taxable, it.gst_rate_bps, supplyType);
-            return {
-              productId: it.product_id,
-              productName: it.product_name,
-              sku: it.sku,
-              hsnCode: it.hsn_code,
-              unit: it.unit,
-              qtyScaled: it.dispatched_qty_scaled,
-              unitPricePaise: it.unit_price_paise,
-              gstRateBps: it.gst_rate_bps,
-              taxablePaise: taxable,
-              ...gstLine,
-              totalPaise: taxable + gstLine.totalGstPaise,
-            };
-          })
-        : [
-            (() => {
-              const taxable = calcTaxablePaise(
-                dispatch.dispatched_qty_scaled,
-                dispatch.selling_price_paise
-              );
-              const gstLine = calcGstPaise(taxable, dispatch.gst_rate_bps, supplyType);
-              return {
-                productId: dispatch.product_id,
-                productName: dispatch.product_name,
-                sku: dispatch.sku,
-                hsnCode: dispatch.hsn_code,
-                unit: dispatch.unit,
-                qtyScaled: dispatch.dispatched_qty_scaled,
-                unitPricePaise: dispatch.selling_price_paise,
-                gstRateBps: dispatch.gst_rate_bps,
-                taxablePaise: taxable,
-                ...gstLine,
-                totalPaise: taxable + gstLine.totalGstPaise,
-              };
-            })(),
-          ];
-
-    const taxablePaise = lineSpecs.reduce((s, l) => s + l.taxablePaise, 0);
-    const cgstTotalPaise = lineSpecs.reduce((s, l) => s + l.cgstPaise, 0);
-    const sgstTotalPaise = lineSpecs.reduce((s, l) => s + l.sgstPaise, 0);
-    const igstTotalPaise = lineSpecs.reduce((s, l) => s + l.igstPaise, 0);
-    const totalGstPaise = cgstTotalPaise + sgstTotalPaise + igstTotalPaise;
-    const totalPaise = taxablePaise + totalGstPaise;
-
-    const nowIso = new Date().toISOString();
-    const invoiceNumber = nextSequenceNumber(db, 'invoices', 'invoice_number', 'INV-2026-');
-    const invoiceId = uid('inv');
-
-    db.prepare(
-      `INSERT INTO invoices (
-        id, invoice_number, order_id, customer_id, dispatch_id, invoice_date,
-        supply_type, place_of_supply_state, taxable_amount_paise,
-        cgst_amount_paise, sgst_amount_paise, igst_amount_paise, total_gst_paise, total_amount_paise,
-        paid_amount_paise, payment_status, created_by, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'UNPAID', ?, ?)`
-    ).run(
-      invoiceId,
-      invoiceNumber,
-      dispatch.order_id,
-      dispatch.customer_id,
-      dispatch.id,
-      nowIso.slice(0, 10),
-      supplyType,
-      dispatch.customer_state,
+    const comp = buildDispatchInvoiceComputation(db, input.dispatchId, {
+      quantity: input.quantity,
+      placeOfSupplyState: input.placeOfSupplyState,
+    });
+    const {
+      dispatch,
+      pos,
+      requestedInvoiceScaled,
+      lineSpecs,
       taxablePaise,
       cgstTotalPaise,
       sgstTotalPaise,
       igstTotalPaise,
       totalGstPaise,
       totalPaise,
+    } = comp;
+
+    const nowIso = new Date().toISOString();
+    const invoiceDate = nowIso.slice(0, 10);
+    const defaultDue = new Date(Date.now() + 15 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const invoiceNumber = nextSequenceNumber(db, 'invoices', 'invoice_number', 'INV-2026-');
+    const invoiceId = uid('inv');
+
+    db.prepare(
+      `INSERT INTO invoices (
+        id, invoice_number, order_id, customer_id, dispatch_id, invoiced_qty_scaled,
+        invoice_date, due_date, supply_type, place_of_supply_state, taxable_amount_paise,
+        cgst_amount_paise, sgst_amount_paise, igst_amount_paise, total_gst_paise, total_amount_paise,
+        paid_amount_paise, payment_status, notes, idempotency_key, created_by, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'UNPAID', ?, ?, ?, ?)`
+    ).run(
+      invoiceId,
+      invoiceNumber,
+      dispatch.order_id,
+      dispatch.customer_id,
+      dispatch.id,
+      requestedInvoiceScaled,
+      invoiceDate,
+      input.dueDate?.trim() || defaultDue,
+      pos.supplyType,
+      pos.placeOfSupplyState,
+      taxablePaise,
+      cgstTotalPaise,
+      sgstTotalPaise,
+      igstTotalPaise,
+      totalGstPaise,
+      totalPaise,
+      input.notes?.trim() || '',
+      input.idempotencyKey || null,
       actor.fullName,
       nowIso
     );
@@ -2864,6 +3086,10 @@ export function createInvoiceFromDispatchByAccountant(
         taxable_amount_paise, cgst_paise, sgst_paise, igst_paise, total_paise
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
+    const updDispLine = db.prepare(
+      `UPDATE dispatch_items SET invoiced_qty_scaled = invoiced_qty_scaled + ? WHERE id = ?`
+    );
+
     for (const line of lineSpecs) {
       insertInvLine.run(
         uid('invl'),
@@ -2882,10 +3108,13 @@ export function createInvoiceFromDispatchByAccountant(
         line.igstPaise,
         line.totalPaise
       );
+      if (line.dispatchItemId) {
+        updDispLine.run(line.qtyScaled, line.dispatchItemId);
+      }
     }
 
-    db.prepare(`UPDATE dispatches SET invoiced_qty_scaled = ? WHERE id = ?`).run(
-      dispatch.dispatched_qty_scaled,
+    db.prepare(`UPDATE dispatches SET invoiced_qty_scaled = invoiced_qty_scaled + ? WHERE id = ?`).run(
+      requestedInvoiceScaled,
       dispatch.id
     );
 
@@ -2895,10 +3124,10 @@ export function createInvoiceFromDispatchByAccountant(
       'INVOICE',
       invoiceId,
       'GENERATE_INVOICE',
-      `${invoiceNumber} generated for ${dispatch.order_number} (${supplyType})`
+      `${invoiceNumber} generated for ${dispatch.order_number} / ${dispatch.dispatch_number} (${fromScaledQty(requestedInvoiceScaled)} units, ${pos.supplyType})`
     );
 
-    return { id: invoiceId, invoiceNumber };
+    return { id: invoiceId, invoiceNumber, deduplicated: false };
   });
 }
 
@@ -2939,11 +3168,15 @@ export function recordPaymentByAccountant(
           customer_id: string;
           total_amount_paise: number;
           paid_amount_paise: number;
+          payment_status: string;
         }
       | undefined;
 
     if (!inv) {
       throw new HttpError(404, `Invoice ${input.invoiceId} not found.`);
+    }
+    if (inv.payment_status === 'CANCELLED') {
+      throw new HttpError(400, `Cannot record payment against cancelled invoice ${inv.invoice_number}.`);
     }
 
     const amountPaise = toPaise(input.amount);
@@ -2964,9 +3197,9 @@ export function recordPaymentByAccountant(
 
     db.prepare(
       `INSERT INTO payments (
-        id, payment_number, invoice_id, customer_id, payment_date, amount_paise,
-        payment_mode, reference_number, recorded_by, notes, idempotency_key, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        id, payment_number, invoice_id, customer_id, payment_date, amount_paise, unallocated_paise,
+        payment_mode, reference_number, status, recorded_by, notes, idempotency_key, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 'POSTED', ?, ?, ?, ?)`
     ).run(
       paymentId,
       paymentNumber,
@@ -2981,6 +3214,11 @@ export function recordPaymentByAccountant(
       input.idempotencyKey || null,
       nowIso
     );
+
+    db.prepare(
+      `INSERT INTO payment_allocations (id, payment_id, invoice_id, amount_paise, created_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(uid('pal'), paymentId, inv.id, amountPaise, nowIso);
 
     const newPaidPaise = inv.paid_amount_paise + amountPaise;
     const nextStatus =

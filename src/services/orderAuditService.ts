@@ -1,11 +1,15 @@
 import type {
+  AccountantDashboardData,
   AuthUser,
   BillingWorkspaceData,
   BomRevisionRequest,
   CatalogueProduct,
   Customer,
+  CustomerReceivableSummary,
   DashboardSummary,
+  DispatchInvoicePreview,
   DispatchRecord,
+  FinancialReportsData,
   InventoryItem,
   ManagedUser,
   MaterialPurchaseRequirement,
@@ -426,10 +430,52 @@ export const orderAuditService = {
     return fetchJson<BillingWorkspaceData>('/api/billing');
   },
 
-  async createInvoice(dispatchId: string): Promise<{ id: string; invoiceNumber: string }> {
+  async createInvoice(
+    dispatchIdOrPayload:
+      | string
+      | {
+          dispatchId: string;
+          quantity?: number;
+          placeOfSupplyState?: string;
+          dueDate?: string;
+          notes?: string;
+          idempotencyKey?: string;
+        }
+  ): Promise<{ id: string; invoiceNumber: string }> {
+    const payload =
+      typeof dispatchIdOrPayload === 'string'
+        ? { dispatchId: dispatchIdOrPayload }
+        : dispatchIdOrPayload;
     return fetchJson('/api/invoices', {
       method: 'POST',
-      body: JSON.stringify({ dispatchId }),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async loadAccountantDashboard(): Promise<AccountantDashboardData> {
+    return fetchJson<AccountantDashboardData>('/api/accountant/dashboard');
+  },
+
+  async previewDispatchInvoice(
+    dispatchId: string,
+    options?: { quantity?: number; placeOfSupplyState?: string }
+  ): Promise<DispatchInvoicePreview> {
+    const qs = new URLSearchParams();
+    if (options?.quantity !== undefined) qs.set('quantity', String(options.quantity));
+    if (options?.placeOfSupplyState) qs.set('placeOfSupplyState', options.placeOfSupplyState);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return fetchJson<DispatchInvoicePreview>(
+      `/api/accountant/dispatches/${encodeURIComponent(dispatchId)}/preview${suffix}`
+    );
+  },
+
+  async cancelInvoice(
+    invoiceId: string,
+    reason: string
+  ): Promise<{ id: string; invoiceNumber: string; status: string }> {
+    return fetchJson(`/api/accountant/invoices/${encodeURIComponent(invoiceId)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
     });
   },
 
@@ -446,6 +492,51 @@ export const orderAuditService = {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  async recordCustomerPayment(payload: {
+    customerId: string;
+    amount: number;
+    allocations: Array<{ invoiceId: string; amount: number }>;
+    paymentMode: string;
+    referenceNumber?: string;
+    paymentDate?: string;
+    notes?: string;
+    idempotencyKey?: string;
+  }): Promise<{ id: string; paymentNumber: string; unallocatedAmount: number }> {
+    return fetchJson('/api/accountant/payments/customer', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async reversePayment(
+    paymentId: string,
+    reason: string
+  ): Promise<{ id: string; paymentNumber: string; status: string }> {
+    return fetchJson(`/api/accountant/payments/${encodeURIComponent(paymentId)}/reverse`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    });
+  },
+
+  async listCustomerReceivables(): Promise<CustomerReceivableSummary[]> {
+    return fetchJson<CustomerReceivableSummary[]>('/api/accountant/receivables');
+  },
+
+  async getFinancialReports(filters?: {
+    from?: string;
+    to?: string;
+    customerId?: string;
+    status?: string;
+  }): Promise<FinancialReportsData> {
+    const qs = new URLSearchParams();
+    if (filters?.from) qs.set('from', filters.from);
+    if (filters?.to) qs.set('to', filters.to);
+    if (filters?.customerId) qs.set('customerId', filters.customerId);
+    if (filters?.status) qs.set('status', filters.status);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return fetchJson<FinancialReportsData>(`/api/accountant/reports${suffix}`);
   },
 
   // --- Management ---

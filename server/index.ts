@@ -57,6 +57,15 @@ import {
   upsertSupplier,
 } from './services.ts';
 import {
+  cancelInvoiceByAccountant,
+  getAccountantDashboard,
+  getFinancialReports,
+  listCustomerReceivables,
+  previewDispatchInvoiceByAccountant,
+  recordCustomerPaymentByAccountant,
+  reversePaymentByAccountant,
+} from './accountantServices.ts';
+import {
   approvePurchaseOrderByOwner,
   checkProductionRequestAvailability,
   createBomRevisionRequest,
@@ -488,8 +497,100 @@ export function createApiHandler(db: DatabaseSync) {
         const body = await readJsonBody(req);
         const result = createInvoiceFromDispatchByAccountant(db, authed, {
           dispatchId: String(body.dispatchId || ''),
+          quantity: body.quantity !== undefined ? Number(body.quantity) : undefined,
+          placeOfSupplyState:
+            typeof body.placeOfSupplyState === 'string' ? body.placeOfSupplyState : undefined,
+          dueDate: typeof body.dueDate === 'string' ? body.dueDate : undefined,
+          notes: typeof body.notes === 'string' ? body.notes : undefined,
+          idempotencyKey:
+            typeof body.idempotencyKey === 'string' ? body.idempotencyKey : undefined,
         });
         return sendJson(res, 201, result);
+      }
+
+      if (method === 'GET' && pathname === '/api/accountant/dashboard') {
+        const authed = requireRole(actor, ['ACCOUNTANT']);
+        return sendJson(res, 200, getAccountantDashboard(db, authed));
+      }
+
+      const dispPreviewMatch = /^\/api\/accountant\/dispatches\/([^/]+)\/preview$/.exec(pathname);
+      if (method === 'GET' && dispPreviewMatch) {
+        const authed = requireRole(actor, ['ACCOUNTANT']);
+        const qtyParam = url.searchParams.get('quantity');
+        const posParam = url.searchParams.get('placeOfSupplyState');
+        return sendJson(
+          res,
+          200,
+          previewDispatchInvoiceByAccountant(db, authed, decodeURIComponent(dispPreviewMatch[1]), {
+            quantity: qtyParam !== null && qtyParam !== '' ? Number(qtyParam) : undefined,
+            placeOfSupplyState: posParam || undefined,
+          })
+        );
+      }
+
+      const invCancelMatch = /^\/api\/accountant\/invoices\/([^/]+)\/cancel$/.exec(pathname);
+      if (method === 'POST' && invCancelMatch) {
+        const authed = requireRole(actor, ['ACCOUNTANT']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          cancelInvoiceByAccountant(
+            db,
+            authed,
+            decodeURIComponent(invCancelMatch[1]),
+            String(body.reason || '')
+          )
+        );
+      }
+
+      if (method === 'POST' && pathname === '/api/accountant/payments/customer') {
+        const authed = requireRole(actor, ['ACCOUNTANT']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          201,
+          recordCustomerPaymentByAccountant(
+            db,
+            authed,
+            body as Parameters<typeof recordCustomerPaymentByAccountant>[2]
+          )
+        );
+      }
+
+      const payRevMatch = /^\/api\/accountant\/payments\/([^/]+)\/reverse$/.exec(pathname);
+      if (method === 'POST' && payRevMatch) {
+        const authed = requireRole(actor, ['ACCOUNTANT']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          reversePaymentByAccountant(
+            db,
+            authed,
+            decodeURIComponent(payRevMatch[1]),
+            String(body.reason || '')
+          )
+        );
+      }
+
+      if (method === 'GET' && pathname === '/api/accountant/receivables') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN', 'ACCOUNTANT']);
+        return sendJson(res, 200, listCustomerReceivables(db, authed));
+      }
+
+      if (method === 'GET' && pathname === '/api/accountant/reports') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN', 'ACCOUNTANT']);
+        return sendJson(
+          res,
+          200,
+          getFinancialReports(db, authed, {
+            from: url.searchParams.get('from') || undefined,
+            to: url.searchParams.get('to') || undefined,
+            customerId: url.searchParams.get('customerId') || undefined,
+            status: url.searchParams.get('status') || undefined,
+          })
+        );
       }
 
       if (method === 'POST' && pathname === '/api/payments') {

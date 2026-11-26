@@ -323,6 +323,10 @@ export function seedDatabaseIfEmpty(db: DatabaseSync): void {
     insertDisp.run('disp-0139', 'DISP-2026-0001', 'ord-2026-0139', toScaledQty(80), toScaledQty(80), '2026-11-22T17:10:00.000Z', 'Admin', 'seed-disp-139', 'Gate Pass GP-884');
     insertDisp.run('disp-0138', 'DISP-2026-0002', 'ord-2026-0138', toScaledQty(40), toScaledQty(40), '2026-11-21T16:30:00.000Z', 'Admin', 'seed-disp-138', 'Inter-state parcel');
 
+    // Seed dispatch_items for seeded dispatches
+    db.prepare(`INSERT INTO dispatch_items (id, dispatch_id, order_item_id, product_id, dispatched_qty_scaled, invoiced_qty_scaled) VALUES (?, ?, ?, ?, ?, ?)`).run('di-seed-1', 'disp-0139', 'oi-ord-2026-0139', 'prod-mrk-200', toScaledQty(80), toScaledQty(80));
+    db.prepare(`INSERT INTO dispatch_items (id, dispatch_id, order_item_id, product_id, dispatched_qty_scaled, invoiced_qty_scaled) VALUES (?, ?, ?, ?, ?, ?)`).run('di-seed-2', 'disp-0138', 'oi-ord-2026-0138', 'prod-pnt-150', toScaledQty(40), toScaledQty(40));
+
     // Invoice 1: Diamond Hostel Canteen (Tamil Nadu -> CGST 2.5% + SGST 2.5%) for 80 * ₹45 = ₹3,600 + ₹180 GST = ₹3,780
     const inv1Taxable = calcTaxablePaise(toScaledQty(80), toPaise(45));
     const inv1Gst = calcGstPaise(inv1Taxable, toGstBps(5), 'INTRA_STATE');
@@ -330,9 +334,9 @@ export function seedDatabaseIfEmpty(db: DatabaseSync): void {
     const inv1Paid = toPaise(2000);
 
     db.prepare(`
-      INSERT INTO invoices (id, invoice_number, order_id, customer_id, dispatch_id, invoice_date, supply_type, place_of_supply_state, taxable_amount_paise, cgst_amount_paise, sgst_amount_paise, igst_amount_paise, total_gst_paise, total_amount_paise, paid_amount_paise, payment_status, created_by, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run('inv-0001', 'INV-2026-0001', 'ord-2026-0139', 'cust-02', 'disp-0139', '2026-11-22', 'INTRA_STATE', 'Tamil Nadu', inv1Taxable, inv1Gst.cgstPaise, inv1Gst.sgstPaise, 0, inv1Gst.totalGstPaise, inv1Total, inv1Paid, 'PARTIALLY_PAID', 'Lakshmi Narayanan (Accountant)', '2026-11-22T18:00:00.000Z');
+      INSERT INTO invoices (id, invoice_number, order_id, customer_id, dispatch_id, invoiced_qty_scaled, invoice_date, due_date, supply_type, place_of_supply_state, taxable_amount_paise, cgst_amount_paise, sgst_amount_paise, igst_amount_paise, total_gst_paise, total_amount_paise, paid_amount_paise, payment_status, created_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('inv-0001', 'INV-2026-0001', 'ord-2026-0139', 'cust-02', 'disp-0139', toScaledQty(80), '2026-11-22', '2026-12-07', 'INTRA_STATE', 'Tamil Nadu', inv1Taxable, inv1Gst.cgstPaise, inv1Gst.sgstPaise, 0, inv1Gst.totalGstPaise, inv1Total, inv1Paid, 'PARTIALLY_PAID', 'Lakshmi Narayanan (Accountant)', '2026-11-22T18:00:00.000Z');
 
     db.prepare(`
       INSERT INTO invoice_lines (id, invoice_id, product_id, product_name, sku, hsn_code, unit, quantity_scaled, unit_price_paise, gst_rate_bps, taxable_amount_paise, cgst_paise, sgst_paise, igst_paise, total_paise)
@@ -344,15 +348,20 @@ export function seedDatabaseIfEmpty(db: DatabaseSync): void {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run('pay-0001', 'PAY-2026-0001', 'inv-0001', 'cust-02', '2026-11-23', inv1Paid, 'UPI / Campus Transfer', 'UTR-NITT-77412', 'Lakshmi Narayanan (Accountant)', 'First installment received; balance pending', 'seed-pay-1', '2026-11-23T11:20:00.000Z');
 
+    db.prepare(`
+      INSERT INTO payment_allocations (id, payment_id, invoice_id, amount_paise, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run('pal-pay-0001', 'pay-0001', 'inv-0001', inv1Paid, '2026-11-23T11:20:00.000Z');
+
     // Invoice 2: Bengaluru Alumni Store (Karnataka -> IGST 12%) for 40 * ₹35 = ₹1,400 + ₹168 IGST = ₹1,568
     const inv2Taxable = calcTaxablePaise(toScaledQty(40), toPaise(35));
     const inv2Gst = calcGstPaise(inv2Taxable, toGstBps(12), 'INTER_STATE');
     const inv2Total = inv2Taxable + inv2Gst.totalGstPaise;
 
     db.prepare(`
-      INSERT INTO invoices (id, invoice_number, order_id, customer_id, dispatch_id, invoice_date, supply_type, place_of_supply_state, taxable_amount_paise, cgst_amount_paise, sgst_amount_paise, igst_amount_paise, total_gst_paise, total_amount_paise, paid_amount_paise, payment_status, created_by, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run('inv-0002', 'INV-2026-0002', 'ord-2026-0138', 'cust-10', 'disp-0138', '2026-11-21', 'INTER_STATE', 'Karnataka', inv2Taxable, 0, 0, inv2Gst.igstPaise, inv2Gst.totalGstPaise, inv2Total, 0, 'UNPAID', 'Lakshmi Narayanan (Accountant)', '2026-11-21T17:45:00.000Z');
+      INSERT INTO invoices (id, invoice_number, order_id, customer_id, dispatch_id, invoiced_qty_scaled, invoice_date, due_date, supply_type, place_of_supply_state, taxable_amount_paise, cgst_amount_paise, sgst_amount_paise, igst_amount_paise, total_gst_paise, total_amount_paise, paid_amount_paise, payment_status, created_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('inv-0002', 'INV-2026-0002', 'ord-2026-0138', 'cust-10', 'disp-0138', toScaledQty(40), '2026-11-21', '2026-12-06', 'INTER_STATE', 'Karnataka', inv2Taxable, 0, 0, inv2Gst.igstPaise, inv2Gst.totalGstPaise, inv2Total, 0, 'UNPAID', 'Lakshmi Narayanan (Accountant)', '2026-11-21T17:45:00.000Z');
 
     db.prepare(`
       INSERT INTO invoice_lines (id, invoice_id, product_id, product_name, sku, hsn_code, unit, quantity_scaled, unit_price_paise, gst_rate_bps, taxable_amount_paise, cgst_paise, sgst_paise, igst_paise, total_paise)

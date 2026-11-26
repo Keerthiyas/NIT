@@ -183,4 +183,46 @@ export const REQUIRED_BACKEND_APIS: ApiEndpointSpec[] = [
     purpose: 'Production Supervisor only: submit BOM adjustment suggestion to Admin for review.',
     implemented: true,
   },
+  {
+    method: 'GET',
+    path: '/api/accountant/dashboard',
+    purpose: 'Accountant only: financial KPIs, unbilled dispatches, and recent payments.',
+    implemented: true,
+  },
+  {
+    method: 'GET',
+    path: '/api/accountant/dispatches/:id/preview',
+    purpose: 'Accountant only: compute GST invoice preview for an uninvoiced dispatch.',
+    implemented: true,
+  },
+  {
+    method: 'POST',
+    path: '/api/accountant/invoices/:id/cancel',
+    purpose: 'Accountant only: auditable cancellation of an unpaid invoice restoring dispatch eligibility.',
+    implemented: true,
+  },
+  {
+    method: 'POST',
+    path: '/api/accountant/payments/customer',
+    purpose: 'Accountant only: record customer payment allocated across one or more invoices.',
+    implemented: true,
+  },
+  {
+    method: 'POST',
+    path: '/api/accountant/payments/:id/reverse',
+    purpose: 'Accountant only: auditable reversal of a posted payment updating invoice balances.',
+    implemented: true,
+  },
+  {
+    method: 'GET',
+    path: '/api/accountant/receivables',
+    purpose: 'Accountant/Admin/Owner: customer-wise outstanding and overdue receivables summary.',
+    implemented: true,
+  },
+  {
+    method: 'GET',
+    path: '/api/accountant/reports',
+    purpose: 'Accountant/Admin/Owner: sales, GST summary, payment collection, and receivables reports.',
+    implemented: true,
+  },
 ];
