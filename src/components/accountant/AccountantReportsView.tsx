@@ -18,7 +18,7 @@ function formatInr(amount: number): string {
   })}`;
 }
 
-export function AccountantReportsView({ customers }: AccountantReceivablesViewProps) {
+export function AccountantReportsView({ customers }: AccountantReportsViewProps) {
   const [activeTab, setActiveTab] = useState<ReportTab>('sales');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
