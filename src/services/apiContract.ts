@@ -225,4 +225,46 @@ export const REQUIRED_BACKEND_APIS: ApiEndpointSpec[] = [
     purpose: 'Accountant/Admin/Owner: sales, GST summary, payment collection, and receivables reports.',
     implemented: true,
   },
+  {
+    method: 'GET',
+    path: '/api/owner/dashboard',
+    purpose: 'Owner only: executive KPIs, sales trend, production overview, and pending approvals.',
+    implemented: true,
+  },
+  {
+    method: 'GET',
+    path: '/api/owner/business-overview',
+    purpose: 'Owner only: sales performance, production performance, and material consumption vs wastage.',
+    implemented: true,
+  },
+  {
+    method: 'GET',
+    path: '/api/owner/inventory',
+    purpose: 'Owner only: read-only multi-category inventory, low-stock alerts, shortages, and movements.',
+    implemented: true,
+  },
+  {
+    method: 'GET',
+    path: '/api/owner/financial',
+    purpose: 'Owner only: read-only financial overview, revenue vs collections, receivables, and GRN expenditure.',
+    implemented: true,
+  },
+  {
+    method: 'GET',
+    path: '/api/owner/approvals',
+    purpose: 'Owner only: list purchase order approvals with threshold and linked shortage details.',
+    implemented: true,
+  },
+  {
+    method: 'PUT',
+    path: '/api/owner/settings/approval-limit',
+    purpose: 'Owner only: update purchase order approval threshold.',
+    implemented: true,
+  },
+  {
+    method: 'GET',
+    path: '/api/owner/reports',
+    purpose: 'Owner only: filtered business, production, inventory, purchase, and financial reports.',
+    implemented: true,
+  },
 ];

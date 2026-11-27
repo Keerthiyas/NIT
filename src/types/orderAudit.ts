@@ -28,6 +28,14 @@ export type AccountantNavSection =
   | 'receivables'
   | 'reports';
 
+export type OwnerNavSection =
+  | 'dashboard'
+  | 'business-overview'
+  | 'inventory-overview'
+  | 'financial-overview'
+  | 'approvals'
+  | 'reports';
+
 export interface AuthUser {
   id: string;
   username: string;
@@ -347,6 +355,7 @@ export interface PurchaseOrder {
   approvalStatus?: 'NOT_REQUIRED' | 'PENDING_OWNER_APPROVAL' | 'APPROVED' | 'REJECTED';
   approvedBy?: string;
   approvedAt?: string;
+  rejectionReason?: string;
   notes?: string;
   createdBy: string;
   createdAt: string;
@@ -971,4 +980,204 @@ export interface SalesmanDashboardData {
   totalOrdersCount: number;
   pendingOrdersCount: number;
   recentOrders: SalesmanOrder[];
+}
+
+// --- Owner Portal ---
+
+export type OwnerStockStatus = 'IN_STOCK' | 'LOW_STOCK' | 'OUT_OF_STOCK';
+
+export interface OwnerInventoryItem extends InventoryItem {
+  stockStatus: OwnerStockStatus;
+}
+
+export interface OwnerApprovalItem extends PurchaseOrder {
+  supplierPhone: string;
+  supplierEmail: string;
+  supplierState: string;
+  supplierAddress: string;
+  reason: string;
+  linkedRequirements: Array<{
+    id: string;
+    requirementNumber: string;
+    requestNumber: string;
+    orderNumber: string;
+    priority: 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT';
+    reason?: string;
+    requestedByName: string;
+  }>;
+  items: Array<{
+    id: string;
+    itemId: string;
+    itemName: string;
+    sku: string;
+    unit: string;
+    category: InventoryCategory;
+    orderedQuantity: number;
+    receivedQuantity: number;
+    unitCost: number;
+    lineEstimatedCost: number;
+    currentAvailableStock: number;
+    reorderLevel: number;
+  }>;
+}
+
+export interface OwnerDashboardData {
+  totalSalesAmount: number;
+  totalOrdersCount: number;
+  pendingOrdersCount: number;
+  productionInProgressCount: number;
+  outstandingPaymentsAmount: number;
+  pendingApprovalsCount: number;
+  salesTrend: {
+    currentMonth: string;
+    previousMonth: string;
+    currentMonthSales: number;
+    previousMonthSales: number;
+    points: Array<{ label: string; salesAmount: number; orderCount: number }>;
+  };
+  productionOverview: {
+    plannedQuantity: number;
+    actualGoodOutput: number;
+    rejectedQuantity: number;
+    completedCount: number;
+    pendingCount: number;
+    byProduct: Array<{
+      productName: string;
+      plannedQuantity: number;
+      actualGoodOutput: number;
+    }>;
+  };
+  pendingApprovals: OwnerApprovalItem[];
+  approvalLimitRupees: number;
+}
+
+export interface OwnerBusinessOverviewData {
+  salesPerformance: {
+    totalOrdersReceived: number;
+    approvedOrders: number;
+    dispatchedOrders: number;
+    cancelledOrders: number;
+    totalSalesValue: number;
+    currentMonth: string;
+    previousMonth: string;
+    currentMonthSales: number;
+    previousMonthSales: number;
+    monthlyTrend: Array<{ month: string; salesValue: number; orderCount: number }>;
+    statusDistribution: Array<{ status: string; count: number; value: number }>;
+  };
+  productionPerformance: {
+    totalRequests: number;
+    completedRequests: number;
+    pendingRequests: number;
+    totalPlannedQuantity: number;
+    actualGoodOutput: number;
+    rejectedOutput: number;
+    plannedVsActualByProduct: Array<{
+      productName: string;
+      plannedQuantity: number;
+      actualGoodOutput: number;
+      rejectedQuantity: number;
+    }>;
+    completionTrend: Array<{
+      month: string;
+      completedRuns: number;
+      plannedQuantity: number;
+      actualGoodOutput: number;
+    }>;
+    materialConsumption: Array<{
+      materialId: string;
+      materialName: string;
+      unit: string;
+      plannedQuantity: number;
+      actualConsumedQuantity: number;
+      wastageQuantity: number;
+      varianceQuantity: number;
+    }>;
+  };
+}
+
+export interface OwnerInventoryOverviewData {
+  rawMaterials: OwnerInventoryItem[];
+  packagingMaterials: OwnerInventoryItem[];
+  finishedProducts: OwnerInventoryItem[];
+  lowStockItems: OwnerInventoryItem[];
+  productionShortages: MaterialShortageQuery[];
+  discrepancyReports: StockDiscrepancyReport[];
+  recentMovements: StockMovement[];
+}
+
+export interface OwnerFinancialOverviewData {
+  totalInvoicedAmount: number;
+  totalAmountCollected: number;
+  outstandingAmount: number;
+  purchaseExpenditure: number;
+  revenueVsCollections: Array<{
+    month: string;
+    invoicedAmount: number;
+    collectedAmount: number;
+  }>;
+  customerOutstanding: Array<{
+    customerId: string;
+    customerCode: string;
+    customerName: string;
+    totalInvoiced: number;
+    totalPaid: number;
+    pendingAmount: number;
+    overdueAmount: number;
+    status: 'SETTLED' | 'OVERDUE' | 'PARTIALLY_PAID' | 'OUTSTANDING';
+  }>;
+  purchaseExpenditureByMonth: Array<{ month: string; amount: number }>;
+  purchaseExpenditureByCategory: Array<{ category: string; amount: number }>;
+}
+
+export interface OwnerApprovalsData {
+  approvalLimitRupees: number;
+  approvals: OwnerApprovalItem[];
+}
+
+export interface OwnerReportsData {
+  salesReport: {
+    totalOrders: number;
+    totalSalesValue: number;
+    rows: Order[];
+  };
+  productionReport: {
+    totalRuns: number;
+    totalPlanned: number;
+    totalGoodOutput: number;
+    totalRejected: number;
+    totalWastage: number;
+    rows: ProductionRun[];
+  };
+  inventoryReport: {
+    totalItems: number;
+    lowStockCount: number;
+    outOfStockCount: number;
+    rows: OwnerInventoryItem[];
+  };
+  purchaseReport: {
+    totalOrders: number;
+    totalEstimatedValue: number;
+    rows: PurchaseOrder[];
+  };
+  outstandingPaymentsReport: {
+    totalOutstanding: number;
+    totalOverdue: number;
+    rows: CustomerReceivableSummary[];
+  };
+  financialSummary: {
+    totalInvoicedAmount: number;
+    totalAmountCollected: number;
+    outstandingAmount: number;
+    purchaseExpenditure: number;
+    gstCollected: number;
+    cgstTotal: number;
+    sgstTotal: number;
+    igstTotal: number;
+    revenueVsCollections: Array<{
+      month: string;
+      invoicedAmount: number;
+      collectedAmount: number;
+    }>;
+  };
 }

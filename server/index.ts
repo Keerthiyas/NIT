@@ -57,6 +57,15 @@ import {
   upsertSupplier,
 } from './services.ts';
 import {
+  getOwnerBusinessOverview,
+  getOwnerDashboard,
+  getOwnerFinancialOverview,
+  getOwnerInventoryOverview,
+  getOwnerReports,
+  listOwnerPurchaseApprovals,
+  updateOwnerApprovalLimit,
+} from './ownerServices.ts';
+import {
   cancelInvoiceByAccountant,
   getAccountantDashboard,
   getFinancialReports,
@@ -208,7 +217,7 @@ export function createApiHandler(db: DatabaseSync) {
 
       const decisionMatch = /^\/api\/orders\/([^/]+)\/decision$/.exec(pathname);
       if (method === 'POST' && decisionMatch) {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = submitOrderDecision(
           db,
@@ -313,7 +322,7 @@ export function createApiHandler(db: DatabaseSync) {
 
       const discReviewMatch = /^\/api\/stock-discrepancies\/([^/]+)\/review$/.exec(pathname);
       if (method === 'POST' && discReviewMatch) {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         return sendJson(
           res,
@@ -349,7 +358,7 @@ export function createApiHandler(db: DatabaseSync) {
 
       const bomReviewMatch = /^\/api\/bom-revisions\/([^/]+)\/review$/.exec(pathname);
       if (method === 'POST' && bomReviewMatch) {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         return sendJson(
           res,
@@ -410,7 +419,7 @@ export function createApiHandler(db: DatabaseSync) {
       }
 
       if (method === 'POST' && pathname === '/api/purchase-orders') {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = createPurchaseOrder(
           db,
@@ -443,7 +452,7 @@ export function createApiHandler(db: DatabaseSync) {
       }
 
       if (method === 'POST' && pathname === '/api/purchase-receipts') {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = postPurchaseReceipt(
           db,
@@ -476,7 +485,7 @@ export function createApiHandler(db: DatabaseSync) {
       }
 
       if (method === 'POST' && pathname === '/api/dispatches') {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = recordDispatch(
           db,
@@ -619,7 +628,7 @@ export function createApiHandler(db: DatabaseSync) {
       }
 
       if (method === 'POST' && pathname === '/api/management/products/image') {
-        requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const saved = validateAndSaveProductImage({
           mimeType: String(body.mimeType || ''),
@@ -635,7 +644,7 @@ export function createApiHandler(db: DatabaseSync) {
       }
 
       if (method === 'POST' && pathname === '/api/management/products') {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = upsertProductAndBom(
           db,
@@ -647,7 +656,7 @@ export function createApiHandler(db: DatabaseSync) {
 
       const prodMatch = /^\/api\/management\/products\/([^/]+)$/.exec(pathname);
       if (method === 'PUT' && prodMatch) {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = upsertProductAndBom(db, authed, {
           ...(body as Parameters<typeof upsertProductAndBom>[2]),
@@ -658,7 +667,7 @@ export function createApiHandler(db: DatabaseSync) {
 
       const prodStatusMatch = /^\/api\/management\/products\/([^/]+)\/status$/.exec(pathname);
       if (method === 'PATCH' && prodStatusMatch) {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = setProductActiveStatus(
           db,
@@ -676,7 +685,7 @@ export function createApiHandler(db: DatabaseSync) {
       }
 
       if (method === 'POST' && pathname === '/api/management/customers') {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = upsertCustomer(
           db,
@@ -688,7 +697,7 @@ export function createApiHandler(db: DatabaseSync) {
 
       const custMatch = /^\/api\/management\/customers\/([^/]+)$/.exec(pathname);
       if (method === 'PUT' && custMatch) {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = upsertCustomer(db, authed, {
           ...(body as Parameters<typeof upsertCustomer>[2]),
@@ -699,7 +708,7 @@ export function createApiHandler(db: DatabaseSync) {
 
       const custStatusMatch = /^\/api\/management\/customers\/([^/]+)\/status$/.exec(pathname);
       if (method === 'PATCH' && custStatusMatch) {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = setCustomerActiveStatus(
           db,
@@ -717,7 +726,7 @@ export function createApiHandler(db: DatabaseSync) {
       }
 
       if (method === 'POST' && pathname === '/api/management/suppliers') {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = upsertSupplier(
           db,
@@ -729,7 +738,7 @@ export function createApiHandler(db: DatabaseSync) {
 
       const supMatch = /^\/api\/management\/suppliers\/([^/]+)$/.exec(pathname);
       if (method === 'PUT' && supMatch) {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = upsertSupplier(db, authed, {
           ...(body as Parameters<typeof upsertSupplier>[2]),
@@ -738,14 +747,14 @@ export function createApiHandler(db: DatabaseSync) {
         return sendJson(res, 200, result);
       }
 
-      // --- Management: User Management (OWNER_SUPER_ADMIN ONLY) ---
+      // --- Management: User Management (ADMIN ONLY; Owner blocked) ---
       if (method === 'GET' && pathname === '/api/management/users') {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         return sendJson(res, 200, listUsers(db, authed));
       }
 
       if (method === 'POST' && pathname === '/api/management/users') {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = createUserByOwner(
           db,
@@ -757,7 +766,7 @@ export function createApiHandler(db: DatabaseSync) {
 
       const userMatch = /^\/api\/management\/users\/([^/]+)$/.exec(pathname);
       if (method === 'PATCH' && userMatch) {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = updateUserByOwner(
           db,
@@ -770,7 +779,7 @@ export function createApiHandler(db: DatabaseSync) {
 
       const userResetMatch = /^\/api\/management\/users\/([^/]+)\/reset-access$/.exec(pathname);
       if (method === 'POST' && userResetMatch) {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        const authed = requireRole(actor, ['ADMIN']);
         const body = await readJsonBody(req);
         const result = resetUserAccessByOwner(
           db,
@@ -779,6 +788,77 @@ export function createApiHandler(db: DatabaseSync) {
           body.temporaryPassword as string | undefined
         );
         return sendJson(res, 200, result);
+      }
+
+      // --- Owner Module Routes (OWNER_SUPER_ADMIN ONLY) ---
+      if (method === 'GET' && pathname === '/api/owner/dashboard') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        return sendJson(
+          res,
+          200,
+          getOwnerDashboard(db, authed, {
+            from: url.searchParams.get('from') || undefined,
+            to: url.searchParams.get('to') || undefined,
+          })
+        );
+      }
+
+      if (method === 'GET' && pathname === '/api/owner/business-overview') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        return sendJson(
+          res,
+          200,
+          getOwnerBusinessOverview(db, authed, {
+            from: url.searchParams.get('from') || undefined,
+            to: url.searchParams.get('to') || undefined,
+          })
+        );
+      }
+
+      if (method === 'GET' && pathname === '/api/owner/inventory') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        return sendJson(res, 200, getOwnerInventoryOverview(db, authed));
+      }
+
+      if (method === 'GET' && pathname === '/api/owner/financial') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        return sendJson(
+          res,
+          200,
+          getOwnerFinancialOverview(db, authed, {
+            from: url.searchParams.get('from') || undefined,
+            to: url.searchParams.get('to') || undefined,
+          })
+        );
+      }
+
+      if (method === 'GET' && pathname === '/api/owner/approvals') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        return sendJson(res, 200, listOwnerPurchaseApprovals(db, authed));
+      }
+
+      if (method === 'PUT' && pathname === '/api/owner/settings/approval-limit') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          updateOwnerApprovalLimit(db, authed, Number(body.approvalLimitRupees))
+        );
+      }
+
+      if (method === 'GET' && pathname === '/api/owner/reports') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        return sendJson(
+          res,
+          200,
+          getOwnerReports(db, authed, {
+            from: url.searchParams.get('from') || undefined,
+            to: url.searchParams.get('to') || undefined,
+            category: url.searchParams.get('category') || undefined,
+            status: url.searchParams.get('status') || undefined,
+          })
+        );
       }
 
       // --- Salesman Dashboard & Ordering (Strictly SALESMAN Role; Zero Stock Exposure) ---

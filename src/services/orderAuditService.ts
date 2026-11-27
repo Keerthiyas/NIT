@@ -17,6 +17,12 @@ import type {
   Order,
   OrderDecisionPayload,
   OrderShortageAnalysis,
+  OwnerApprovalsData,
+  OwnerBusinessOverviewData,
+  OwnerDashboardData,
+  OwnerFinancialOverviewData,
+  OwnerInventoryOverviewData,
+  OwnerReportsData,
   Product,
   ProductionRequest,
   ProductionRun,
@@ -200,7 +206,7 @@ export const orderAuditService = {
     poId: string,
     approve: boolean,
     note?: string
-  ): Promise<{ id: string; poNumber: string; approvalStatus: string }> {
+  ): Promise<{ id: string; poNumber: string; approvalStatus: string; rejectionReason?: string }> {
     return fetchJson(`/api/purchase-orders/${encodeURIComponent(poId)}/approve`, {
       method: 'POST',
       body: JSON.stringify({ approve, note }),
@@ -757,5 +763,71 @@ export const orderAuditService = {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  // --- Owner Portal ---
+  async loadOwnerDashboard(filters?: {
+    from?: string;
+    to?: string;
+  }): Promise<OwnerDashboardData> {
+    const qs = new URLSearchParams();
+    if (filters?.from) qs.set('from', filters.from);
+    if (filters?.to) qs.set('to', filters.to);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return fetchJson<OwnerDashboardData>(`/api/owner/dashboard${suffix}`);
+  },
+
+  async loadOwnerBusinessOverview(filters?: {
+    from?: string;
+    to?: string;
+  }): Promise<OwnerBusinessOverviewData> {
+    const qs = new URLSearchParams();
+    if (filters?.from) qs.set('from', filters.from);
+    if (filters?.to) qs.set('to', filters.to);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return fetchJson<OwnerBusinessOverviewData>(`/api/owner/business-overview${suffix}`);
+  },
+
+  async loadOwnerInventoryOverview(): Promise<OwnerInventoryOverviewData> {
+    return fetchJson<OwnerInventoryOverviewData>('/api/owner/inventory');
+  },
+
+  async loadOwnerFinancialOverview(filters?: {
+    from?: string;
+    to?: string;
+  }): Promise<OwnerFinancialOverviewData> {
+    const qs = new URLSearchParams();
+    if (filters?.from) qs.set('from', filters.from);
+    if (filters?.to) qs.set('to', filters.to);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return fetchJson<OwnerFinancialOverviewData>(`/api/owner/financial${suffix}`);
+  },
+
+  async loadOwnerApprovals(): Promise<OwnerApprovalsData> {
+    return fetchJson<OwnerApprovalsData>('/api/owner/approvals');
+  },
+
+  async updateOwnerApprovalLimit(
+    limitRupees: number
+  ): Promise<{ approvalLimitRupees: number }> {
+    return fetchJson<{ approvalLimitRupees: number }>('/api/owner/settings/approval-limit', {
+      method: 'PUT',
+      body: JSON.stringify({ limitRupees }),
+    });
+  },
+
+  async loadOwnerReports(filters?: {
+    from?: string;
+    to?: string;
+    category?: string;
+    status?: string;
+  }): Promise<OwnerReportsData> {
+    const qs = new URLSearchParams();
+    if (filters?.from) qs.set('from', filters.from);
+    if (filters?.to) qs.set('to', filters.to);
+    if (filters?.category) qs.set('category', filters.category);
+    if (filters?.status) qs.set('status', filters.status);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return fetchJson<OwnerReportsData>(`/api/owner/reports${suffix}`);
   },
 };

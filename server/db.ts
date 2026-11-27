@@ -514,6 +514,16 @@ export function initializeSchema(db: DatabaseSync): void {
       action TEXT NOT NULL,
       details TEXT NOT NULL DEFAULT ''
     );
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_by TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL
+    );
+
+    INSERT OR IGNORE INTO app_settings (key, value, updated_by, updated_at)
+    VALUES ('purchase_approval_limit_paise', '1000000', 'System Default', '2026-11-25T09:00:00.000Z');
   `);
 
   // Safe migration for existing databases adding product image_url & bom_version
@@ -626,6 +636,9 @@ export function initializeSchema(db: DatabaseSync): void {
     db.exec(`ALTER TABLE purchase_orders ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'NOT_REQUIRED'`);
     db.exec(`ALTER TABLE purchase_orders ADD COLUMN approved_by TEXT NOT NULL DEFAULT ''`);
     db.exec(`ALTER TABLE purchase_orders ADD COLUMN approved_at TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!poCols.some((c) => c.name === 'rejection_reason')) {
+    db.exec(`ALTER TABLE purchase_orders ADD COLUMN rejection_reason TEXT NOT NULL DEFAULT ''`);
   }
 
   // Safe migration for production_runs extended fields

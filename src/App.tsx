@@ -47,8 +47,7 @@ export function App() {
     })();
   }, []);
 
-  const isAdminUser =
-    currentUser?.role === 'ADMIN' || currentUser?.role === 'OWNER_SUPER_ADMIN';
+  const isAdminUser = currentUser?.role === 'ADMIN';
 
   const refreshWorkspace = useCallback(async () => {
     if (!isAdminUser) return;
@@ -185,6 +184,15 @@ export function App() {
   if (currentUser.role === 'SALESMAN') {
     return (
       <SalesmanPortalView
+        user={currentUser}
+        onLogout={() => void handleLogout()}
+      />
+    );
+  }
+
+  if (currentUser.role === 'OWNER_SUPER_ADMIN') {
+    return (
+      <OwnerPortalView
         user={currentUser}
         onLogout={() => void handleLogout()}
       />

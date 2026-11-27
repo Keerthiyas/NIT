@@ -113,7 +113,7 @@ export function ManagementView({
   const [uPassword, setUPassword] = useState('');
 
   const [submitting, setSubmitting] = useState(false);
-  const isOwner = currentUser.role === 'OWNER_SUPER_ADMIN';
+  const canManageUsers = currentUser.role === 'ADMIN';
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -130,7 +130,7 @@ export function ManagementView({
       setCustomers(custs);
       setSuppliers(sups);
 
-      if (isOwner) {
+      if (canManageUsers) {
         const uList = await orderAuditService.listUsers();
         setUsers(uList);
       } else {
@@ -141,7 +141,7 @@ export function ManagementView({
     } finally {
       setLoading(false);
     }
-  }, [isOwner]);
+  }, [canManageUsers]);
 
   useEffect(() => {
     void loadAll();
@@ -721,21 +721,19 @@ export function ManagementView({
             </Card>
           )}
 
-          {/* D. USER MANAGEMENT (OWNER / SUPER ADMIN ONLY) */}
+          {/* D. USER MANAGEMENT (ADMIN ONLY) */}
           {subTab === 'users' && (
             <>
-              {!isOwner ? (
+              {!canManageUsers ? (
                 <Card title="User Management (Restricted)">
                   <div className="flex items-start gap-3 rounded-md border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900">
                     <ShieldAlert className="h-4 w-4 shrink-0 mt-0.5" />
                     <div>
-                      <p className="font-semibold">
-                        Owner / Super Admin Authorization Required
-                      </p>
+                      <p className="font-semibold">Admin Authorization Required</p>
                       <p className="mt-1">
                         Your current role is <strong>{currentUser.role}</strong>. Creating users,
                         assigning roles, toggling account status, and resetting access are
-                        enforced exclusively for <strong>OWNER_SUPER_ADMIN</strong> on the backend.
+                        enforced exclusively for <strong>ADMIN</strong> on the backend.
                       </p>
                     </div>
                   </div>
@@ -743,7 +741,7 @@ export function ManagementView({
               ) : (
                 <Card
                   title="User Accounts & Role-Based Access"
-                  subtitle="Enforced on backend API routes for Owner/Super Admin only"
+                  subtitle="Enforced on backend API routes for Admin only"
                   noPadding
                   action={
                     <button

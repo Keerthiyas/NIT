@@ -86,11 +86,11 @@ describe('Order-to-Audit Backend RBAC, Inventory Ledger, Production & Billing Wo
     // Unauthenticated rejected
     expect((await callApi(handler, 'GET', '/api/admin/dashboard')).status).toBe(401);
 
-    // Plain ADMIN cannot access User Management (OWNER_SUPER_ADMIN only)
-    expect((await callApi(handler, 'GET', '/api/management/users', adminToken)).status).toBe(403);
+    // Owner, Supervisor, Accountant CANNOT access Admin-only User Management; Admin CAN (200)
+    expect((await callApi(handler, 'GET', '/api/management/users', ownerToken)).status).toBe(403);
     expect(
       (
-        await callApi(handler, 'POST', '/api/management/users', adminToken, {
+        await callApi(handler, 'POST', '/api/management/users', ownerToken, {
           username: 'test',
           fullName: 'Test',
           email: 't@nitt.local',
@@ -99,7 +99,7 @@ describe('Order-to-Audit Backend RBAC, Inventory Ledger, Production & Billing Wo
         })
       ).status
     ).toBe(403);
-    expect((await callApi(handler, 'GET', '/api/management/users', ownerToken)).status).toBe(200);
+    expect((await callApi(handler, 'GET', '/api/management/users', adminToken)).status).toBe(200);
 
     // Admin CANNOT post production runs or update supervisor status
     expect(

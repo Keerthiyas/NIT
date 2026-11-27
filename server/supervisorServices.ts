@@ -693,6 +693,11 @@ export function approvePurchaseOrderByOwner(
 ) {
   requireRole(actor, ['OWNER_SUPER_ADMIN']);
 
+  const cleanNote = (note ?? '').trim();
+  if (!approve && !cleanNote) {
+    throw new HttpError(400, 'Rejection reason is required when rejecting a purchase request.');
+  }
+
   return runInTransaction(db, () => {
     const po = db
       .prepare(`SELECT * FROM purchase_orders WHERE id = ?`)
@@ -712,7 +717,7 @@ export function approvePurchaseOrderByOwner(
     if (po.approval_status !== 'PENDING_OWNER_APPROVAL') {
       throw new HttpError(
         400,
-        `Purchase order ${po.po_number} is already ${po.approval_status}.`
+        `Purchase order ${po.po_number} is already ${po.approval_status} and cannot be re-processed.`
       );
     }
 
@@ -722,6 +727,7 @@ export function approvePurchaseOrderByOwner(
     db.prepare(
       `UPDATE purchase_orders
        SET approval_status = ?, approved_by = ?, approved_at = ?,
+           rejection_reason = ?,
            status = CASE WHEN ? = 0 THEN 'CANCELLED' ELSE status END,
            notes = CASE WHEN ? != '' THEN notes || ' | Owner: ' || ? ELSE notes END,
            updated_at = ?
@@ -730,9 +736,10 @@ export function approvePurchaseOrderByOwner(
       nextApprovalStatus,
       actor.fullName,
       nowIso,
+      approve ? '' : cleanNote,
       approve ? 1 : 0,
-      note?.trim() || '',
-      note?.trim() || '',
+      cleanNote,
+      cleanNote,
       nowIso,
       po.id
     );
@@ -757,10 +764,17 @@ export function approvePurchaseOrderByOwner(
       'PURCHASE_ORDER',
       po.id,
       approve ? 'OWNER_APPROVE_PO' : 'OWNER_REJECT_PO',
-      `${po.po_number} (₹${fromPaise(po.estimated_total_paise)}): ${nextApprovalStatus}${note ? ` — ${note}` : ''}`
+      `${po.po_number} (₹${fromPaise(po.estimated_total_paise)}): ${nextApprovalStatus}${cleanNote ? ` — ${cleanNote}` : ''}`
     );
 
-    return { id: po.id, poNumber: po.po_number, approvalStatus: nextApprovalStatus };
+    return {
+      id: po.id,
+      poNumber: po.po_number,
+      approvalStatus: nextApprovalStatus,
+      approvedBy: actor.fullName,
+      approvedAt: nowIso,
+      rejectionReason: approve ? undefined : cleanNote,
+    };
   });
 }
 
@@ -906,7 +920,7 @@ export function reviewStockDiscrepancyReport(
   decision: 'APPROVE' | 'REJECT',
   note?: string
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+  requireRole(actor, ['ADMIN']);
 
   return runInTransaction(db, () => {
     const rep = db
@@ -1138,7 +1152,7 @@ export function reviewBomRevisionRequest(
   decision: 'APPROVE' | 'REJECT',
   note?: string
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+  requireRole(actor, ['ADMIN']);
 
   return runInTransaction(db, () => {
     const reqRow = db

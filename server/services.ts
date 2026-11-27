@@ -862,7 +862,7 @@ export function submitOrderDecision(
   decision: 'SEND_FOR_PRODUCTION' | 'WAIT_KEEP_PENDING' | 'APPROVE_ORDER' | 'REJECT_ORDER',
   note?: string
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+  requireRole(actor, ['ADMIN']);
 
   return runInTransaction(db, () => {
     const order = db
@@ -1385,7 +1385,18 @@ export function listMaterialShortageQueries(db: DatabaseSync) {
   });
 }
 
-export const PURCHASE_OWNER_APPROVAL_LIMIT_PAISE = 1000000; // ₹10,000.00
+export const PURCHASE_OWNER_APPROVAL_LIMIT_PAISE = 1000000; // ₹10,000.00 default
+
+export function getPurchaseApprovalLimitPaise(db: DatabaseSync): number {
+  const row = db
+    .prepare(`SELECT value FROM app_settings WHERE key = 'purchase_approval_limit_paise'`)
+    .get() as { value: string } | undefined;
+  const parsed = row ? Number.parseInt(row.value, 10) : NaN;
+  if (Number.isFinite(parsed) && parsed >= 0) {
+    return parsed;
+  }
+  return PURCHASE_OWNER_APPROVAL_LIMIT_PAISE;
+}
 
 export function listPurchaseOrders(db: DatabaseSync) {
   const pos = db
@@ -1407,6 +1418,7 @@ export function listPurchaseOrders(db: DatabaseSync) {
     approval_status: string;
     approved_by: string;
     approved_at: string;
+    rejection_reason: string;
     notes: string;
     created_by: string;
     created_at: string;
@@ -1444,6 +1456,7 @@ export function listPurchaseOrders(db: DatabaseSync) {
       approvalStatus: po.approval_status || 'NOT_REQUIRED',
       approvedBy: po.approved_by || undefined,
       approvedAt: po.approved_at || undefined,
+      rejectionReason: po.rejection_reason || undefined,
       notes: po.notes || undefined,
       createdBy: po.created_by,
       createdAt: po.created_at,
@@ -1473,7 +1486,7 @@ export function createPurchaseOrder(
     notes?: string;
   }
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+  requireRole(actor, ['ADMIN']);
 
   if (!input.supplierId || !input.items?.length) {
     throw new HttpError(400, 'Supplier and at least one material line item are required.');
@@ -1509,7 +1522,8 @@ export function createPurchaseOrder(
       preparedLines.push({ itemId: item.id, qtyScaled, unitCostPaise });
     }
 
-    const requiresOwnerApproval = estimatedTotalPaise > PURCHASE_OWNER_APPROVAL_LIMIT_PAISE;
+    const approvalLimitPaise = getPurchaseApprovalLimitPaise(db);
+    const requiresOwnerApproval = estimatedTotalPaise > approvalLimitPaise;
     const approvalStatus = requiresOwnerApproval ? 'PENDING_OWNER_APPROVAL' : 'NOT_REQUIRED';
 
     db.prepare(
@@ -1649,7 +1663,7 @@ export function postPurchaseReceipt(
     notes?: string;
   }
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+  requireRole(actor, ['ADMIN']);
 
   if (!input.supplierId || !input.items?.length) {
     throw new HttpError(400, 'Supplier and received items are required.');
@@ -2356,7 +2370,7 @@ export function recordDispatch(
   actor: AuthUser,
   input: { orderId: string; quantity: number; notes?: string; idempotencyKey?: string }
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+  requireRole(actor, ['ADMIN']);
 
   return runInTransaction(db, () => {
     if (input.idempotencyKey) {
@@ -3298,7 +3312,7 @@ export function upsertProductAndBom(
     bomItems: Array<{ materialId: string; quantityPerUnit: number }>;
   }
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+  requireRole(actor, ['ADMIN']);
 
   if (!input.sku?.trim() || !input.name?.trim() || !input.unit?.trim() || !input.hsnCode?.trim()) {
     throw new HttpError(400, 'SKU, product name, unit of measurement, and HSN code are required.');
@@ -3435,7 +3449,7 @@ export function setProductActiveStatus(
   productId: string,
   isActive: boolean
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+  requireRole(actor, ['ADMIN']);
   const nowIso = new Date().toISOString();
   const res = db
     .prepare(
@@ -3502,7 +3516,7 @@ export function upsertCustomer(
     isActive?: boolean;
   }
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+  requireRole(actor, ['ADMIN']);
   if (!input.code?.trim() || !input.name?.trim() || !input.state?.trim()) {
     throw new HttpError(400, 'Customer code, name, and state are required.');
   }
@@ -3578,7 +3592,7 @@ export function setCustomerActiveStatus(
   customerId: string,
   isActive: boolean
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+  requireRole(actor, ['ADMIN']);
   const res = db
     .prepare(`UPDATE customers SET is_active = ?, updated_at = ? WHERE id = ?`)
     .run(isActive ? 1 : 0, new Date().toISOString(), customerId);
@@ -3668,7 +3682,7 @@ export function upsertSupplier(
     materialIds: string[];
   }
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
+  requireRole(actor, ['ADMIN']);
   if (!input.code?.trim() || !input.name?.trim()) {
     throw new HttpError(400, 'Supplier code and name are required.');
   }
@@ -3752,7 +3766,7 @@ export function upsertSupplier(
 // ---------------------------------------------------------------------------
 
 export function listUsers(db: DatabaseSync, actor: AuthUser) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN']);
+  requireRole(actor, ['ADMIN']);
   const rows = db
     .prepare(
       `SELECT id, username, full_name, email, role, is_active, must_reset_password, created_at, updated_at
@@ -3794,7 +3808,7 @@ export function createUserByOwner(
     password: string;
   }
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN']);
+  requireRole(actor, ['ADMIN']);
   if (!input.username?.trim() || !input.fullName?.trim() || !input.email?.trim() || !input.password) {
     throw new HttpError(400, 'Username, full name, email, and initial password are required.');
   }
@@ -3824,7 +3838,7 @@ export function updateUserByOwner(
   userId: string,
   input: { role?: UserRole; isActive?: boolean; fullName?: string }
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN']);
+  requireRole(actor, ['ADMIN']);
   const target = db
     .prepare(`SELECT id, role, is_active, full_name FROM users WHERE id = ?`)
     .get(userId) as
@@ -3865,7 +3879,7 @@ export function resetUserAccessByOwner(
   userId: string,
   temporaryPassword?: string
 ) {
-  requireRole(actor, ['OWNER_SUPER_ADMIN']);
+  requireRole(actor, ['ADMIN']);
   const target = db.prepare(`SELECT id, email FROM users WHERE id = ?`).get(userId) as
     | { id: string; email: string }
     | undefined;
