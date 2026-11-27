@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   Eye,
+  History,
   KeyRound,
   Lock,
   Plus,
+  Search,
   ShieldAlert,
   Trash2,
   Upload,
@@ -17,14 +19,19 @@ import type {
   Customer,
   InventoryItem,
   ManagedUser,
+  MaterialProposal,
+  ProductBomVersion,
+  ProductProposal,
   Supplier,
   UserRole,
 } from '../../types/orderAudit';
 import { Card } from '../ui/Card';
 import { ToneBadge } from '../ui/Badge';
 import { ProductImage } from '../ui/ProductImage';
+import { ApprovedProposalsSection } from './ApprovedProposalsSection';
+import { MaterialCatalogueSection } from './MaterialCatalogueSection';
 
-type ManagementTab = 'products' | 'customers' | 'suppliers' | 'users';
+type ManagementTab = 'registrations' | 'products' | 'materials' | 'customers' | 'suppliers' | 'users';
 
 const INDIAN_STATES = [
   'Tamil Nadu',
@@ -55,13 +62,18 @@ export function ManagementView({
 
   const [products, setProducts] = useState<CatalogueProduct[]>([]);
   const [materials, setMaterials] = useState<InventoryItem[]>([]);
+  const [materialProposals, setMaterialProposals] = useState<MaterialProposal[]>([]);
+  const [productProposals, setProductProposals] = useState<ProductProposal[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [users, setUsers] = useState<ManagedUser[]>([]);
 
-  // Product modal state
+  // Product catalogue filter + BOM modal state
+  const [pSearch, setPSearch] = useState('');
+  const [pStatusFilter, setPStatusFilter] = useState<'ALL' | 'ACTIVE' | 'INACTIVE'>('ALL');
   const [prodModalOpen, setProdModalOpen] = useState(false);
   const [detailProduct, setDetailProduct] = useState<CatalogueProduct | null>(null);
+  const [detailBomHistory, setDetailBomHistory] = useState<ProductBomVersion[]>([]);
   const [editingProdId, setEditingProdId] = useState<string | undefined>(undefined);
   const [pSku, setPSku] = useState('');
   const [pName, setPName] = useState('');
@@ -75,6 +87,10 @@ export function ManagementView({
   const [pImageUploading, setPImageUploading] = useState(false);
   const [pImageError, setPImageError] = useState<string | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const [pBomApprovalStatus, setPBomApprovalStatus] = useState<'APPROVED' | 'DRAFT'>('APPROVED');
+  const [pBomEffectiveDate, setPBomEffectiveDate] = useState(() =>
+    new Date().toISOString().slice(0, 10)
+  );
   const [pBom, setPBom] = useState<Array<{ materialId: string; quantityPerUnit: string }>>([]);
 
   // Customer modal state
@@ -119,14 +135,18 @@ export function ManagementView({
     setLoading(true);
     setError(null);
     try {
-      const [prods, inv, custs, sups] = await Promise.all([
+      const [prods, mats, proposals, prodProps, custs, sups] = await Promise.all([
         orderAuditService.listCatalogueProducts(),
-        orderAuditService.listInventoryItems(),
+        orderAuditService.listMaterialsCatalogue(),
+        orderAuditService.listMaterialProposals(),
+        orderAuditService.listProductProposals(),
         orderAuditService.listCustomers(),
         orderAuditService.listSuppliers(),
       ]);
       setProducts(prods);
-      setMaterials(inv.filter((i) => i.category !== 'FINISHED_GOOD'));
+      setMaterials(mats);
+      setMaterialProposals(proposals);
+      setProductProposals(prodProps);
       setCustomers(custs);
       setSuppliers(sups);
 
@@ -149,6 +169,31 @@ export function ManagementView({
 
   const activeMaterials = useMemo(() => materials.filter((m) => m.isActive), [materials]);
 
+  const filteredProducts = useMemo(() => {
+    const q = pSearch.trim().toLowerCase();
+    return products.filter((prod) => {
+      if (pStatusFilter === 'ACTIVE' && !prod.isActive) return false;
+      if (pStatusFilter === 'INACTIVE' && prod.isActive) return false;
+      if (!q) return true;
+      return (
+        prod.name.toLowerCase().includes(q) ||
+        prod.sku.toLowerCase().includes(q) ||
+        prod.hsnCode.toLowerCase().includes(q)
+      );
+    });
+  }, [products, pSearch, pStatusFilter]);
+
+  const openProductDetail = async (prod: CatalogueProduct) => {
+    setDetailProduct(prod);
+    setDetailBomHistory([]);
+    try {
+      const hist = await orderAuditService.listProductBomHistory(prod.id);
+      setDetailBomHistory(hist);
+    } catch {
+      setDetailBomHistory([]);
+    }
+  };
+
   // --- Product Handlers ---
   const openProductModal = (prod?: CatalogueProduct) => {
     setPImageError(null);
@@ -163,6 +208,10 @@ export function ManagementView({
       setPUnit(prod.unit);
       setPReorder(String(prod.reorderLevel));
       setPImageUrl(prod.imageUrl ?? '');
+      setPBomApprovalStatus(prod.bomApprovalStatus === 'DRAFT' ? 'DRAFT' : 'APPROVED');
+      setPBomEffectiveDate(
+        prod.bomEffectiveDate || new Date().toISOString().slice(0, 10)
+      );
       setPBom(
         prod.bomItems.map((b) => ({
           materialId: b.materialId,
@@ -180,6 +229,8 @@ export function ManagementView({
       setPUnit('packets');
       setPReorder('40');
       setPImageUrl('');
+      setPBomApprovalStatus('APPROVED');
+      setPBomEffectiveDate(new Date().toISOString().slice(0, 10));
       setPBom([]);
     }
     setProdModalOpen(true);
@@ -220,6 +271,8 @@ export function ManagementView({
         imageUrl: pImageUrl,
         unit: pUnit,
         reorderLevel: Number(pReorder || 0),
+        bomApprovalStatus: pBomApprovalStatus,
+        bomEffectiveDate: pBomEffectiveDate,
         bomItems: pBom
           .filter((b) => b.materialId && Number(b.quantityPerUnit) > 0)
           .map((b) => ({
@@ -427,13 +480,27 @@ export function ManagementView({
     }
   };
 
+  const pendingRegistrationsCount = useMemo(
+    () =>
+      productProposals.filter((p) => p.status === 'APPROVED_PENDING_REGISTRATION').length,
+    [productProposals]
+  );
+
   return (
     <div className="space-y-4">
-      {/* 4 Management Subsections */}
+      {/* Management Subsections */}
       <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-200 pb-2.5">
         {(
           [
+            {
+              id: 'registrations',
+              label:
+                pendingRegistrationsCount > 0
+                  ? `Approved Proposals (${pendingRegistrationsCount})`
+                  : 'Approved Proposals',
+            },
             { id: 'products', label: 'Product Catalogue' },
+            { id: 'materials', label: 'Material Catalogue' },
             { id: 'customers', label: 'Customers' },
             { id: 'suppliers', label: 'Suppliers' },
             { id: 'users', label: 'User Management' },
@@ -476,21 +543,58 @@ export function ManagementView({
         </div>
       ) : (
         <>
+          {/* 0. APPROVED PROPOSALS PENDING CATALOGUE REGISTRATION */}
+          {subTab === 'registrations' && (
+            <ApprovedProposalsSection
+              proposals={productProposals}
+              onRefresh={async () => {
+                await loadAll();
+                onDataChanged?.();
+              }}
+              onBanner={(msg) => setBannerMsg(msg || null)}
+              onError={(msg) => setError(msg || null)}
+            />
+          )}
+
           {/* A. PRODUCT CATALOGUE */}
           {subTab === 'products' && (
             <Card
-              title="Product Catalogue & Bill of Materials (BOM)"
-              subtitle="Adding a product registers SKU, GST, HSN, and BOM without creating stock"
+              title="Product Catalogue & Predefined Bill of Materials (BOM)"
+              subtitle="Owner-approved price/reorder, Accountant-confirmed GST/HSN, and Supervisor-approved BOM. Creating a product initializes 0 stock."
               noPadding
               action={
-                <button
-                  type="button"
-                  onClick={() => openProductModal()}
-                  className="inline-flex items-center gap-1 rounded-md bg-blue-950 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-900"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  Add Product
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-400" />
+                    <input
+                      type="search"
+                      value={pSearch}
+                      onChange={(e) => setPSearch(e.target.value)}
+                      placeholder="Search product or SKU..."
+                      className="w-44 rounded-md border border-slate-300 bg-white pl-8 pr-2.5 py-1 text-xs"
+                    />
+                  </div>
+                  <select
+                    value={pStatusFilter}
+                    onChange={(e) =>
+                      setPStatusFilter(e.target.value as 'ALL' | 'ACTIVE' | 'INACTIVE')
+                    }
+                    className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs"
+                  >
+                    <option value="ALL">All Statuses</option>
+                    <option value="ACTIVE">Active</option>
+                    <option value="INACTIVE">Inactive</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setSubTab('registrations')}
+                    className="inline-flex items-center gap-1 rounded-md bg-blue-950 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-900"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Register Approved Product
+                    {pendingRegistrationsCount > 0 ? ` (${pendingRegistrationsCount})` : ''}
+                  </button>
+                </div>
               }
             >
               <div className="overflow-x-auto">
@@ -502,13 +606,13 @@ export function ManagementView({
                       <th className="px-4 py-2.5 text-right">Selling Price</th>
                       <th className="px-4 py-2.5 text-right">GST %</th>
                       <th className="px-4 py-2.5">HSN</th>
-                      <th className="px-4 py-2.5">BOM</th>
+                      <th className="px-4 py-2.5">Predefined BOM</th>
                       <th className="px-4 py-2.5">Status</th>
                       <th className="px-4 py-2.5 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {products.map((prod) => (
+                    {filteredProducts.map((prod) => (
                       <tr key={prod.id} className="hover:bg-slate-50/70">
                         <td className="px-4 py-2.5">
                           <div className="flex items-center gap-3">
@@ -534,7 +638,25 @@ export function ManagementView({
                           {prod.hsnCode}
                         </td>
                         <td className="px-4 py-2.5 text-xs text-slate-600">
-                          {prod.bomItems.length} component{prod.bomItems.length === 1 ? '' : 's'}
+                          {prod.bomItems.length === 0 ? (
+                            <ToneBadge tone="danger">Missing BOM</ToneBadge>
+                          ) : (
+                            <div className="space-y-0.5">
+                              <span className="font-medium text-slate-800">
+                                {prod.bomVersion || 'v1.0'} · {prod.bomItems.length} item
+                                {prod.bomItems.length === 1 ? '' : 's'}
+                              </span>
+                              <div>
+                                <ToneBadge
+                                  tone={
+                                    prod.bomApprovalStatus === 'DRAFT' ? 'warning' : 'success'
+                                  }
+                                >
+                                  {prod.bomApprovalStatus === 'DRAFT' ? 'Draft BOM' : 'Approved BOM'}
+                                </ToneBadge>
+                              </div>
+                            </div>
+                          )}
                         </td>
                         <td className="px-4 py-2.5">
                           <ToneBadge tone={prod.isActive ? 'success' : 'neutral'}>
@@ -544,7 +666,7 @@ export function ManagementView({
                         <td className="px-4 py-2.5 text-right space-x-1.5 whitespace-nowrap">
                           <button
                             type="button"
-                            onClick={() => setDetailProduct(prod)}
+                            onClick={() => void openProductDetail(prod)}
                             className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
                           >
                             <Eye className="h-3 w-3" />
@@ -555,7 +677,7 @@ export function ManagementView({
                             onClick={() => openProductModal(prod)}
                             className="rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-blue-900 hover:bg-blue-50"
                           >
-                            Edit / BOM
+                            Edit Image / SKU
                           </button>
                           <button
                             type="button"
@@ -567,10 +689,28 @@ export function ManagementView({
                         </td>
                       </tr>
                     ))}
+                    {filteredProducts.length === 0 && (
+                      <tr>
+                        <td colSpan={8} className="px-4 py-6 text-center text-xs text-slate-500">
+                          No products match your search or status filter.
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
             </Card>
+          )}
+
+          {/* A2. SEPARATE MATERIAL CATALOGUE */}
+          {subTab === 'materials' && (
+            <MaterialCatalogueSection
+              materials={materials}
+              proposals={materialProposals}
+              onRefresh={loadAll}
+              onBanner={(msg) => setBannerMsg(msg || null)}
+              onError={(msg) => setError(msg || null)}
+            />
           )}
 
           {/* B. CUSTOMERS */}
@@ -897,9 +1037,34 @@ export function ManagementView({
               </div>
 
               <div className="border-t border-slate-200 pt-3">
-                <p className="font-semibold text-slate-800 mb-2">
-                  Bill of Materials (per 1 {detailProduct.unit})
-                </p>
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <p className="font-semibold text-slate-800">
+                    Bill of Materials ({detailProduct.bomVersion || 'v1.0'} · per 1{' '}
+                    {detailProduct.unit})
+                  </p>
+                  <div className="flex items-center gap-2">
+                    {detailProduct.bomEffectiveDate && (
+                      <span className="text-[11px] text-slate-500">
+                        Effective: {detailProduct.bomEffectiveDate}
+                      </span>
+                    )}
+                    <ToneBadge
+                      tone={
+                        detailProduct.bomApprovalStatus === 'DRAFT'
+                          ? 'warning'
+                          : detailProduct.bomItems.length === 0
+                            ? 'danger'
+                            : 'success'
+                      }
+                    >
+                      {detailProduct.bomItems.length === 0
+                        ? 'Missing BOM'
+                        : detailProduct.bomApprovalStatus === 'DRAFT'
+                          ? 'Draft'
+                          : 'Approved'}
+                    </ToneBadge>
+                  </div>
+                </div>
                 {detailProduct.bomItems.length === 0 ? (
                   <p className="text-slate-500">No BOM components linked.</p>
                 ) : (
@@ -909,6 +1074,7 @@ export function ManagementView({
                         <tr>
                           <th className="px-3 py-1.5">Material</th>
                           <th className="px-3 py-1.5">SKU</th>
+                          <th className="px-3 py-1.5">Basis</th>
                           <th className="px-3 py-1.5 text-right">Qty / Unit</th>
                         </tr>
                       </thead>
@@ -917,9 +1083,15 @@ export function ManagementView({
                           <tr key={b.id}>
                             <td className="px-3 py-1.5 font-medium text-slate-800">
                               {b.materialName}
+                              {b.isMaterialActive === false && (
+                                <span className="ml-1 text-rose-600">(Inactive)</span>
+                              )}
                             </td>
                             <td className="px-3 py-1.5 font-mono text-slate-500">
                               {b.materialSku}
+                            </td>
+                            <td className="px-3 py-1.5 text-slate-500">
+                              1 {detailProduct.unit}
                             </td>
                             <td className="px-3 py-1.5 text-right tabular-nums">
                               {b.quantityPerUnit} {b.unit}
@@ -928,6 +1100,31 @@ export function ManagementView({
                         ))}
                       </tbody>
                     </table>
+                  </div>
+                )}
+
+                {detailBomHistory.length > 1 && (
+                  <div className="mt-3 pt-2.5 border-t border-slate-100">
+                    <p className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+                      <History className="h-3 w-3" />
+                      BOM Version History ({detailBomHistory.length} versions)
+                    </p>
+                    <ul className="space-y-1 text-[11px] text-slate-600">
+                      {detailBomHistory.map((ver) => (
+                        <li
+                          key={ver.id}
+                          className="flex items-center justify-between rounded bg-slate-50 px-2.5 py-1"
+                        >
+                          <span>
+                            <strong>{ver.bomVersion}</strong> · {ver.approvalStatus} · Effective{' '}
+                            {ver.effectiveDate} ({ver.items.length} components)
+                          </span>
+                          <span className="text-slate-400">
+                            {ver.approvedBy || ver.createdBy || ''}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 )}
               </div>
@@ -976,11 +1173,9 @@ export function ManagementView({
               </button>
             </header>
             <div className="p-5 space-y-3 text-xs">
-              {!editingProdId && (
-                <p className="rounded border border-blue-200 bg-blue-50 px-3 py-2 text-blue-900">
-                  Adding a product creates a catalogue definition with <strong>0 stock</strong>. Stock increases only via posted production runs.
-                </p>
-              )}
+              <p className="rounded border border-blue-200 bg-blue-50 px-3 py-2 text-blue-900">
+                Verified product price, GST/HSN, reorder level, and BOM quantities are read-only. Admin may update SKU and product image; other changes require re-verification.
+              </p>
 
               {/* Product Image Upload / Preview */}
               <div className="flex flex-wrap items-center gap-4 rounded-md border border-slate-200 bg-slate-50/70 p-3">
@@ -1050,138 +1245,120 @@ export function ManagementView({
                   />
                 </div>
                 <div>
-                  <label className="block font-medium text-slate-700 mb-1">Product Name</label>
+                  <label className="block font-medium text-slate-700 mb-1">Product Name (Verified)</label>
                   <input
                     required
+                    disabled={Boolean(editingProdId)}
                     value={pName}
                     onChange={(e) => setPName(e.target.value)}
                     placeholder="Thattai 200 g"
-                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm"
+                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm disabled:bg-slate-50"
                   />
                 </div>
                 <div>
-                  <label className="block font-medium text-slate-700 mb-1">Pack Size</label>
+                  <label className="block font-medium text-slate-700 mb-1">Pack Size (Verified)</label>
                   <input
+                    disabled={Boolean(editingProdId)}
                     value={pPackSize}
                     onChange={(e) => setPPackSize(e.target.value)}
                     placeholder="200 g"
-                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm"
+                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm disabled:bg-slate-50"
                   />
                 </div>
                 <div>
-                  <label className="block font-medium text-slate-700 mb-1">Unit of Measure</label>
+                  <label className="block font-medium text-slate-700 mb-1">Unit of Measure (Verified)</label>
                   <input
                     required
+                    disabled={Boolean(editingProdId)}
                     value={pUnit}
                     onChange={(e) => setPUnit(e.target.value)}
                     placeholder="packets"
-                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm"
+                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm disabled:bg-slate-50"
                   />
                 </div>
                 <div>
-                  <label className="block font-medium text-slate-700 mb-1">Selling Price (₹)</label>
+                  <label className="block font-medium text-slate-700 mb-1">
+                    Selling Price (₹) <span className="text-[10px] font-normal text-slate-400">(Owner-approved)</span>
+                  </label>
                   <input
                     required
+                    disabled={Boolean(editingProdId)}
                     type="number"
                     step="0.01"
                     min="0"
                     value={pPrice}
                     onChange={(e) => setPPrice(e.target.value)}
-                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm"
+                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm disabled:bg-slate-50"
                   />
                 </div>
                 <div>
-                  <label className="block font-medium text-slate-700 mb-1">GST Rate (%)</label>
+                  <label className="block font-medium text-slate-700 mb-1">
+                    GST Rate (%) <span className="text-[10px] font-normal text-slate-400">(Accountant-confirmed)</span>
+                  </label>
                   <input
                     required
+                    disabled={Boolean(editingProdId)}
                     type="number"
                     step="0.5"
                     min="0"
                     max="28"
                     value={pGst}
                     onChange={(e) => setPGst(e.target.value)}
-                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm"
+                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm disabled:bg-slate-50"
                   />
                 </div>
                 <div>
-                  <label className="block font-medium text-slate-700 mb-1">HSN Code</label>
+                  <label className="block font-medium text-slate-700 mb-1">
+                    HSN Code <span className="text-[10px] font-normal text-slate-400">(Accountant-confirmed)</span>
+                  </label>
                   <input
                     required
+                    disabled={Boolean(editingProdId)}
                     value={pHsn}
                     onChange={(e) => setPHsn(e.target.value)}
-                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm"
+                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm disabled:bg-slate-50"
                   />
                 </div>
                 <div>
-                  <label className="block font-medium text-slate-700 mb-1">Reorder Level</label>
+                  <label className="block font-medium text-slate-700 mb-1">
+                    Reorder Level <span className="text-[10px] font-normal text-slate-400">(Owner-approved)</span>
+                  </label>
                   <input
+                    disabled={Boolean(editingProdId)}
                     type="number"
                     min="0"
                     value={pReorder}
                     onChange={(e) => setPReorder(e.target.value)}
-                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm"
+                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm disabled:bg-slate-50"
                   />
                 </div>
               </div>
 
               <div className="border-t border-slate-200 pt-3">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-semibold text-slate-800">
-                    Bill of Materials (per 1 {pUnit || 'unit'})
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setPBom([
-                        ...pBom,
-                        { materialId: activeMaterials[0]?.id ?? '', quantityPerUnit: '0.1' },
-                      ])
-                    }
-                    className="inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-[11px] font-medium text-blue-900 hover:bg-blue-50"
-                  >
-                    <Plus className="h-3 w-3" />
-                    Add Material
-                  </button>
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <div>
+                    <span className="font-semibold text-slate-800">
+                      Approved Bill of Materials (Read-Only · per 1 {pUnit || 'unit'})
+                    </span>
+                    <p className="text-[11px] text-slate-500">
+                      BOM revisions must be submitted by Production Supervisor and approved by Owner.
+                    </p>
+                  </div>
                 </div>
-                <div className="space-y-2 max-h-44 overflow-y-auto">
-                  {pBom.map((line, idx) => (
-                    <div key={idx} className="flex items-center gap-2">
-                      <select
-                        value={line.materialId}
-                        onChange={(e) => {
-                          const next = [...pBom];
-                          next[idx] = { ...next[idx], materialId: e.target.value };
-                          setPBom(next);
-                        }}
-                        className="flex-1 rounded border border-slate-300 px-2 py-1 text-xs"
-                      >
-                        {activeMaterials.map((m) => (
-                          <option key={m.id} value={m.id}>
-                            {m.name} ({m.unit})
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        type="number"
-                        step="0.0001"
-                        min="0.0001"
-                        value={line.quantityPerUnit}
-                        onChange={(e) => {
-                          const next = [...pBom];
-                          next[idx] = { ...next[idx], quantityPerUnit: e.target.value };
-                          setPBom(next);
-                        }}
-                        className="w-24 rounded border border-slate-300 px-2 py-1 text-xs text-right"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setPBom(pBom.filter((_, i) => i !== idx))}
-                        className="rounded p-1 text-rose-600 hover:bg-rose-50"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  ))}
+                <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                  {pBom.map((line, idx) => {
+                    const mat = materials.find((m) => m.id === line.materialId);
+                    return (
+                      <div key={idx} className="flex items-center justify-between rounded border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs">
+                        <span className="font-medium text-slate-800">
+                          {mat?.name ?? line.materialId} ({mat?.sku ?? ''})
+                        </span>
+                        <span className="tabular-nums font-medium text-slate-700">
+                          {line.quantityPerUnit} {mat?.unit ?? ''}
+                        </span>
+                      </div>
+                    );
+                  })}
                   {pBom.length === 0 && (
                     <p className="text-slate-400">No BOM materials linked yet.</p>
                   )}

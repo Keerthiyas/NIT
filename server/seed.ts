@@ -169,13 +169,30 @@ export function seedDatabaseIfEmpty(db: DatabaseSync): void {
       insertSupMat.run('sup-3', pkg);
     }
 
-    // 5. Seed BOM Items (both Raw Materials + Packaging Materials)
+    // 5. Seed Predefined Approved BOMs + BOM Items (both Raw Materials + Packaging Materials)
+    const insertBomHeader = db.prepare(`
+      INSERT INTO boms (
+        id, product_id, bom_version, approval_status, quantity_basis,
+        effective_date, notes, approved_by, created_by, created_at, updated_at
+      ) VALUES (?, ?, 'v1.0', 'APPROVED', 'PER_UNIT', '2026-11-01', 'Supervisor-approved baseline recipe', 'Karthik Raja (Supervisor)', 'Meenakshi Sundaram (Admin)', '2026-11-01T09:00:00.000Z', '2026-11-01T09:00:00.000Z')
+    `);
+    for (const pid of ['prod-mrk-200', 'prod-mix-250', 'prod-pnt-150', 'prod-rib-200']) {
+      insertBomHeader.run(`bomhdr-${pid}-v1_0`, pid);
+    }
+
     const insertBom = db.prepare(`
-      INSERT INTO bom_items (id, product_id, material_id, quantity_per_unit_scaled)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO bom_items (id, bom_id, product_id, material_id, quantity_per_unit_scaled, unit, quantity_basis)
+      SELECT ?, ?, ?, ?, ?, unit, 'PER_UNIT' FROM inventory_items WHERE id = ?
     `);
     const seedBom = (productId: string, materialId: string, qty: number) => {
-      insertBom.run(`bom-${productId}-${materialId}`, productId, materialId, toScaledQty(qty));
+      insertBom.run(
+        `bom-${productId}-${materialId}`,
+        `bomhdr-${productId}-v1_0`,
+        productId,
+        materialId,
+        toScaledQty(qty),
+        materialId
+      );
     };
 
     // Murukku 200 g
@@ -267,21 +284,21 @@ export function seedDatabaseIfEmpty(db: DatabaseSync): void {
 
     // 7. Seed Production Requests (1 active pending, 1 completed)
     const insertPr = db.prepare(`
-      INSERT INTO production_requests (id, request_number, order_id, product_id, requested_qty_scaled, status, assigned_supervisor_id, supervisor_status, created_at, created_by, notes, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO production_requests (id, request_number, order_id, product_id, bom_id, requested_qty_scaled, status, assigned_supervisor_id, supervisor_status, created_at, created_by, notes, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    insertPr.run('pr-ord-141', 'PR-2026-0001', 'ord-2026-0141', 'prod-rib-200', toScaledQty(60), 'PENDING_SUPERVISOR_REVIEW', null, 'Pending Supervisor Review', '2026-11-24T14:05:00.000Z', 'Admin', 'Awaiting supervisor batch scheduling.', '2026-11-24T14:05:00.000Z');
-    insertPr.run('pr-ord-137', 'PR-2026-0000', 'ord-2026-0137', 'prod-mrk-200', toScaledQty(50), 'COMPLETED', 'usr-supervisor', 'Completed & Posted', '2026-11-20T10:00:00.000Z', 'Admin', 'Batch completed by supervisor.', '2026-11-20T15:30:00.000Z');
+    insertPr.run('pr-ord-141', 'PR-2026-0001', 'ord-2026-0141', 'prod-rib-200', 'bomhdr-prod-rib-200-v1_0', toScaledQty(60), 'PENDING_SUPERVISOR_REVIEW', null, 'Pending Supervisor Review', '2026-11-24T14:05:00.000Z', 'Admin', 'Awaiting supervisor batch scheduling.', '2026-11-24T14:05:00.000Z');
+    insertPr.run('pr-ord-137', 'PR-2026-0000', 'ord-2026-0137', 'prod-mrk-200', 'bomhdr-prod-mrk-200-v1_0', toScaledQty(50), 'COMPLETED', 'usr-supervisor', 'Completed & Posted', '2026-11-20T10:00:00.000Z', 'Admin', 'Batch completed by supervisor.', '2026-11-20T15:30:00.000Z');
 
     // 8. Seed 1 Completed Production Run for PR-2026-0000 (planned 50, actual 48, rejected 2, yield 96%)
     db.prepare(`
       INSERT INTO production_runs (
-        id, run_number, production_request_id, product_id, bom_version,
+        id, run_number, production_request_id, product_id, bom_id, bom_version,
         planned_qty_scaled, actual_output_qty_scaled, rejected_qty_scaled, damaged_packaging_qty_scaled,
         wastage_qty_scaled, variance_qty_scaled, yield_percent_bps, quality_result, status,
         supervisor_user_id, supervisor_name, created_by_name, started_at, completed_at, posted_at, notes, idempotency_key
       )
-      VALUES (?, ?, ?, ?, 'v1.0', ?, ?, ?, ?, ?, ?, ?, 'PASSED', 'POSTED', ?, ?, 'Meenakshi Sundaram (Admin)', '2026-11-20T11:00:00.000Z', '2026-11-20T15:25:00.000Z', ?, ?, ?)
+      VALUES (?, ?, ?, ?, 'bomhdr-prod-mrk-200-v1_0', 'v1.0', ?, ?, ?, ?, ?, ?, ?, 'PASSED', 'POSTED', ?, ?, 'Meenakshi Sundaram (Admin)', '2026-11-20T11:00:00.000Z', '2026-11-20T15:25:00.000Z', ?, ?, ?)
     `).run(
       'run-2026-0001',
       'RUN-2026-0001',

@@ -44,17 +44,33 @@ export function ShortageRecommendationPanel({
     setDecisionNote('');
   };
 
+  const overallBadge = (() => {
+    if (!analysis.productionRequired) {
+      return { tone: 'success' as const, label: 'Stock Available' };
+    }
+    if (analysis.rawMaterialAvailability === 'MISSING_BOM') {
+      return { tone: 'danger' as const, label: 'Missing Approved BOM' };
+    }
+    if (analysis.rawMaterialAvailability === 'SUFFICIENT') {
+      return { tone: 'navy' as const, label: 'Ready for Production' };
+    }
+    return { tone: 'danger' as const, label: 'Material Shortage' };
+  })();
+
   return (
     <div className="space-y-4">
-      {/* 1. Finished-Goods Availability Summary */}
+      {/* 1. Overall Status & Finished-Goods Availability Summary */}
       <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-4">
-        <div className="flex items-center justify-between gap-2 mb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
           <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-600">
-            Finished-Goods Availability Check
+            C. Overall Order &amp; Production Status
           </h3>
-          <ToneBadge tone={analysis.productionRequired ? 'warning' : 'success'}>
-            {analysis.productionRequired ? 'Shortage Detected' : 'Stock Sufficient'}
-          </ToneBadge>
+          <div className="flex items-center gap-2">
+            {analysis.productionRequired && (
+              <ToneBadge tone="warning">Production Required</ToneBadge>
+            )}
+            <ToneBadge tone={overallBadge.tone}>{overallBadge.label}</ToneBadge>
+          </div>
         </div>
 
         <dl className="grid grid-cols-3 gap-3 text-sm">
@@ -159,12 +175,28 @@ export function ShortageRecommendationPanel({
                   : 'danger'
               }
             >
-              Raw Materials:{' '}
+              Materials:{' '}
               {analysis.rawMaterialAvailability === 'SUFFICIENT'
-                ? 'Sufficient'
-                : 'Insufficient'}
+                ? 'Ready for Production'
+                : analysis.rawMaterialAvailability === 'MISSING_BOM'
+                  ? 'Approved BOM Missing'
+                  : 'Material Shortage'}
             </ToneBadge>
           </div>
+
+          {analysis.missingBomProducts && analysis.missingBomProducts.length > 0 && (
+            <div className="rounded-md border border-rose-300 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-900">
+              <p className="font-semibold">Approved Predefined BOM Required</p>
+              <p className="mt-0.5">
+                Missing or unapproved BOM for:{' '}
+                <strong>
+                  {analysis.missingBomProducts.map((p) => p.productName).join(', ')}
+                </strong>
+                . Configure and approve the BOM in Product Catalogue before creating a
+                Production Request.
+              </p>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 gap-2 rounded-md border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm sm:grid-cols-2">
             <div>
@@ -217,30 +249,34 @@ export function ShortageRecommendationPanel({
             </div>
           )}
 
-          {/* BOM Evaluation Table */}
+          {/* B. BOM Requirements Table */}
           <div>
-            <p className="text-xs font-medium text-slate-600 mb-1.5">
-              BOM Raw-Material Check for {analysis.shortageQuantity} {analysis.unit}
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-600 mb-1.5">
+              B. BOM Requirements ({analysis.shortageQuantity} {analysis.unit} production needed)
             </p>
             <div className="overflow-x-auto rounded-md border border-slate-200">
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
                   <tr>
                     <th className="px-3 py-2 font-medium">Material</th>
-                    <th className="px-3 py-2 text-right font-medium">Per Unit</th>
                     <th className="px-3 py-2 text-right font-medium">Required</th>
-                    <th className="px-3 py-2 text-right font-medium">In Stock</th>
+                    <th className="px-3 py-2 text-right font-medium">Available</th>
+                    <th className="px-3 py-2 text-right font-medium">Shortage</th>
                     <th className="px-3 py-2 font-medium">Status</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {analysis.bomBreakdown.map((line) => (
                     <tr key={line.rawMaterialId}>
-                      <td className="px-3 py-2 font-medium text-slate-800">
-                        {line.materialName}
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums text-slate-500">
-                        {line.quantityPerUnit} {line.unit}
+                      <td className="px-3 py-2">
+                        <p className="font-medium text-slate-800">{line.materialName}</p>
+                        <p className="text-[11px] text-slate-500">
+                          {line.materialCode}
+                          {line.category === 'PACKAGING_MATERIAL' ? ' · Packaging' : ' · Raw Material'}
+                          {line.isMaterialActive === false && (
+                            <span className="ml-1 text-rose-700 font-medium">(Inactive Material)</span>
+                          )}
+                        </p>
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums font-medium text-slate-900">
                         {line.requiredQuantity} {line.unit}
@@ -248,11 +284,16 @@ export function ShortageRecommendationPanel({
                       <td className="px-3 py-2 text-right tabular-nums text-slate-700">
                         {line.availableStock} {line.unit}
                       </td>
+                      <td
+                        className={`px-3 py-2 text-right tabular-nums font-semibold ${
+                          line.shortfallQuantity > 0 ? 'text-rose-700' : 'text-slate-500'
+                        }`}
+                      >
+                        {line.shortfallQuantity} {line.unit}
+                      </td>
                       <td className="px-3 py-2">
                         <ToneBadge tone={line.isSufficient ? 'success' : 'danger'}>
-                          {line.isSufficient
-                            ? 'Sufficient'
-                            : `Short ${line.shortfallQuantity} ${line.unit}`}
+                          {line.isSufficient ? 'Available' : 'Shortage'}
                         </ToneBadge>
                       </td>
                     </tr>
@@ -263,7 +304,7 @@ export function ShortageRecommendationPanel({
                         colSpan={5}
                         className="px-3 py-3 text-center text-slate-500"
                       >
-                        No BOM items configured for this product.
+                        No approved BOM items configured for this product.
                       </td>
                     </tr>
                   )}
@@ -347,7 +388,11 @@ export function ShortageRecommendationPanel({
             <div className="flex flex-wrap items-center gap-2.5 pt-1">
               <button
                 type="button"
-                disabled={submitting || Boolean(existingProductionRequest)}
+                disabled={
+                  submitting ||
+                  Boolean(existingProductionRequest) ||
+                  analysis.rawMaterialAvailability === 'MISSING_BOM'
+                }
                 onClick={() => handleAction('SEND_FOR_PRODUCTION')}
                 className="inline-flex items-center gap-1.5 rounded-md bg-blue-950 px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-900 disabled:cursor-not-allowed disabled:opacity-50"
               >

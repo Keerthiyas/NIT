@@ -441,6 +441,15 @@ describe('Production Supervisor Module — Complete 13-Scenario End-to-End Verif
     });
     expect(bomReq.status).toBe(201);
 
+    const bomOwnerApprove = await callApi(
+      handler,
+      'POST',
+      `/api/bom-revisions/${bomReq.data.id}/owner-approve`,
+      ownerToken,
+      { approve: true, note: 'Owner approved recipe revision' }
+    );
+    expect(bomOwnerApprove.status).toBe(200);
+
     const bomApprove = await callApi(
       handler,
       'POST',

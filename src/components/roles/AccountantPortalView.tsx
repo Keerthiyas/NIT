@@ -13,6 +13,7 @@ import { AccountantDashboardView } from '../accountant/AccountantDashboardView';
 import { AccountantInvoicesView } from '../accountant/AccountantInvoicesView';
 import { AccountantLayout } from '../accountant/AccountantLayout';
 import { AccountantPaymentsView } from '../accountant/AccountantPaymentsView';
+import { AccountantProductVerifyView } from '../accountant/AccountantProductVerifyView';
 import { AccountantReceivablesView } from '../accountant/AccountantReceivablesView';
 import { AccountantReportsView } from '../accountant/AccountantReportsView';
 
@@ -147,6 +148,10 @@ export function AccountantPortalView({ user, onLogout }: AccountantPortalViewPro
 
           {activeSection === 'reports' && (
             <AccountantReportsView customers={receivables} />
+          )}
+
+          {activeSection === 'product-verifications' && (
+            <AccountantProductVerifyView />
           )}
         </>
       )}

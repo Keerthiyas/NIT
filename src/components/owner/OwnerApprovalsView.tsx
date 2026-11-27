@@ -5,6 +5,7 @@ import type { OwnerApprovalItem, OwnerApprovalsData } from '../../types/orderAud
 import { ToneBadge } from '../ui/Badge';
 import { Card } from '../ui/Card';
 import { formatInr } from './OwnerCharts';
+import { OwnerProductProposalsPanel } from './OwnerProductProposalsPanel';
 
 interface OwnerApprovalsViewProps {
   initialSelectedPoId?: string | null;
@@ -17,6 +18,7 @@ export function OwnerApprovalsView({
   initialSelectedPoId,
   onApprovalsChanged,
 }: OwnerApprovalsViewProps) {
+  const [approvalTab, setApprovalTab] = useState<'purchase' | 'products'>('purchase');
   const [data, setData] = useState<OwnerApprovalsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -130,8 +132,38 @@ export function OwnerApprovalsView({
 
   return (
     <div className="space-y-5">
-      {/* Configurable Approval Limit Card */}
-      <Card
+      {/* Switch between Purchase Approvals & Product Launch Approvals */}
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-200 pb-2.5">
+        <button
+          type="button"
+          onClick={() => setApprovalTab('purchase')}
+          className={`rounded-md px-3 py-1.5 text-xs font-medium cursor-pointer ${
+            approvalTab === 'purchase'
+              ? 'bg-blue-950 text-white'
+              : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+          }`}
+        >
+          Purchase Order Approvals
+        </button>
+        <button
+          type="button"
+          onClick={() => setApprovalTab('products')}
+          className={`rounded-md px-3 py-1.5 text-xs font-medium cursor-pointer ${
+            approvalTab === 'products'
+              ? 'bg-blue-950 text-white'
+              : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+          }`}
+        >
+          Product Launch Proposals
+        </button>
+      </div>
+
+      {approvalTab === 'products' ? (
+        <OwnerProductProposalsPanel onChanged={onApprovalsChanged} />
+      ) : (
+        <>
+          {/* Configurable Approval Limit Card */}
+          <Card
         title="Approval Threshold Configuration"
         subtitle="Purchase orders with estimated value above this amount require Owner authorization before receipt"
       >
@@ -501,6 +533,8 @@ export function OwnerApprovalsView({
             </div>
           </form>
         </div>
+      )}
+        </>
       )}
     </div>
   );

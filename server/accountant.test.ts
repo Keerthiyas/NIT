@@ -76,27 +76,13 @@ describe('Accountant Module — GST Invoicing, Partial Dispatches, Allocations, 
   });
 
   it('Section 8 + 11: Murukku ₹75 (150 ordered -> dispatch 100 -> GST ₹7,875 -> partial ₹4,000 -> dispatch 50 -> separate invoice -> full settle)', async () => {
-    // Update Murukku price to ₹75 so Taxable = 100 * 75 = ₹7,500, CGST 2.5% = ₹187.50, SGST 2.5% = ₹187.50, Total = ₹7,875
+    // Update Murukku selling price to ₹75 via Owner-approved governance before invoicing checks
+    db.prepare(`UPDATE inventory_items SET selling_price_paise = ? WHERE id = 'prod-mrk-200'`).run(
+      7500
+    );
     const products = (await callApi(handler, 'GET', '/api/management/products', adminToken))
       .data as unknown as Array<Record<string, any>>;
     const murukku = products.find((p) => p.id === 'prod-mrk-200')!;
-
-    await callApi(handler, 'PUT', `/api/management/products/${murukku.id}`, adminToken, {
-      sku: murukku.sku,
-      name: murukku.name,
-      packSize: murukku.packSize,
-      sellingPrice: 75,
-      gstRate: 5,
-      hsnCode: murukku.hsnCode,
-      imageUrl: murukku.imageUrl,
-      unit: murukku.unit,
-      reorderLevel: murukku.reorderLevel,
-      isActive: true,
-      bomItems: murukku.bomItems.map((b: Record<string, any>) => ({
-        materialId: b.materialId,
-        quantityPerUnit: b.quantityPerUnit,
-      })),
-    });
 
     // Ensure enough Murukku FG stock & approve a 150-packet Tamil Nadu order
     const inv = (await callApi(handler, 'GET', '/api/inventory/items', adminToken))

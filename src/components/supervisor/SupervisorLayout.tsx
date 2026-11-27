@@ -3,6 +3,7 @@ import {
   Boxes,
   ClipboardCheck,
   Factory,
+  FilePlus2,
   History,
   LayoutDashboard,
   LogOut,
@@ -23,6 +24,7 @@ const SUPERVISOR_NAV_ITEMS: NavItem[] = [
   { id: 'inventory', label: 'Material Inventory', icon: Boxes },
   { id: 'execution', label: 'Production Execution', icon: Factory },
   { id: 'history', label: 'Production History', icon: History },
+  { id: 'proposals', label: 'Product Proposals', icon: FilePlus2 },
 ];
 
 interface SupervisorLayoutProps {

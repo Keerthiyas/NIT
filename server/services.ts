@@ -107,6 +107,158 @@ function assertNoDuplicateCustomer(
   }
 }
 
+export function bumpBomVersion(version: string): string {
+  const match = /^v(\d+)\.(\d+)$/.exec((version || 'v1.0').trim());
+  if (match) {
+    return `v${match[1]}.${Number(match[2]) + 1}`;
+  }
+  return `${version || 'v1.0'}.1`;
+}
+
+function normalizeUnitToken(unit: string): string {
+  const u = (unit || '').trim().toLowerCase();
+  if (['g', 'gm', 'gms', 'gram', 'grams'].includes(u)) return 'g';
+  if (['kg', 'kgs', 'kilogram', 'kilograms'].includes(u)) return 'kg';
+  if (['mg', 'milligram', 'milligrams'].includes(u)) return 'mg';
+  if (['ml', 'millilitre', 'milliliter', 'millilitres', 'milliliters'].includes(u)) return 'ml';
+  if (['l', 'lt', 'ltr', 'litre', 'liter', 'litres', 'liters'].includes(u)) return 'litre';
+  if (['pc', 'pcs', 'piece', 'pieces'].includes(u)) return 'pcs';
+  if (['pkt', 'pkts', 'packet', 'packets'].includes(u)) return 'packets';
+  return u;
+}
+
+const WEIGHT_IN_GRAMS: Record<string, number> = { mg: 0.001, g: 1, kg: 1000 };
+const VOLUME_IN_ML: Record<string, number> = { ml: 1, litre: 1000 };
+
+/**
+ * Safely converts a BOM component quantity into the material's inventory ledger unit.
+ */
+export function convertBomQtyToMaterialUnit(
+  qty: number,
+  fromUnit: string,
+  toUnit: string
+): number {
+  const fromNorm = normalizeUnitToken(fromUnit || toUnit);
+  const toNorm = normalizeUnitToken(toUnit);
+  if (!fromNorm || !toNorm || fromNorm === toNorm) {
+    return qty;
+  }
+  if (WEIGHT_IN_GRAMS[fromNorm] && WEIGHT_IN_GRAMS[toNorm]) {
+    return (qty * WEIGHT_IN_GRAMS[fromNorm]) / WEIGHT_IN_GRAMS[toNorm];
+  }
+  if (VOLUME_IN_ML[fromNorm] && VOLUME_IN_ML[toNorm]) {
+    return (qty * VOLUME_IN_ML[fromNorm]) / VOLUME_IN_ML[toNorm];
+  }
+  throw new HttpError(
+    400,
+    `Unit '${fromUnit}' cannot be converted to material inventory unit '${toUnit}'.`
+  );
+}
+
+export interface BomHeaderRow {
+  id: string;
+  product_id: string;
+  bom_version: string;
+  approval_status: 'DRAFT' | 'APPROVED' | 'ARCHIVED';
+  quantity_basis: string;
+  effective_date: string;
+  notes: string;
+  approved_by: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export function getEffectiveApprovedBomHeader(
+  db: DatabaseSync,
+  productId: string
+): BomHeaderRow | undefined {
+  return db
+    .prepare(
+      `SELECT * FROM boms
+       WHERE product_id = ? AND approval_status = 'APPROVED'
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`
+    )
+    .get(productId) as BomHeaderRow | undefined;
+}
+
+export function getLatestBomHeader(
+  db: DatabaseSync,
+  productId: string
+): BomHeaderRow | undefined {
+  return db
+    .prepare(
+      `SELECT * FROM boms
+       WHERE product_id = ?
+       ORDER BY CASE WHEN approval_status = 'APPROVED' THEN 0 WHEN approval_status = 'DRAFT' THEN 1 ELSE 2 END,
+                created_at DESC, rowid DESC
+       LIMIT 1`
+    )
+    .get(productId) as BomHeaderRow | undefined;
+}
+
+export function getProductBomSnapshot(
+  db: DatabaseSync,
+  productId: string,
+  preferredBomId?: string | null
+) {
+  let bomHeader: BomHeaderRow | undefined;
+  if (preferredBomId) {
+    bomHeader = db
+      .prepare(`SELECT * FROM boms WHERE id = ?`)
+      .get(preferredBomId) as BomHeaderRow | undefined;
+  }
+  if (!bomHeader) {
+    bomHeader = getEffectiveApprovedBomHeader(db, productId);
+  }
+
+  let bomStatus: 'APPROVED' | 'UNAPPROVED_BOM' | 'MISSING_BOM' = 'MISSING_BOM';
+  if (bomHeader) {
+    bomStatus = bomHeader.approval_status === 'APPROVED' ? 'APPROVED' : 'UNAPPROVED_BOM';
+  } else {
+    const draft = db
+      .prepare(`SELECT id FROM boms WHERE product_id = ? AND approval_status = 'DRAFT' LIMIT 1`)
+      .get(productId);
+    bomStatus = draft ? 'UNAPPROVED_BOM' : 'MISSING_BOM';
+  }
+
+  const lines = bomHeader
+    ? (db
+        .prepare(
+          `SELECT b.id, b.bom_id, b.material_id, b.quantity_per_unit_scaled,
+                  b.unit AS bom_unit, b.quantity_basis,
+                  m.sku AS material_code, m.name AS material_name, m.unit AS material_unit,
+                  m.category, m.is_active AS material_is_active,
+                  sb.quantity_scaled AS available_scaled
+           FROM bom_items b
+           JOIN inventory_items m ON m.id = b.material_id
+           JOIN stock_balances sb ON sb.item_id = m.id
+           WHERE b.bom_id = ?
+           ORDER BY m.category, m.name`
+        )
+        .all(bomHeader.id) as Array<{
+        id: string;
+        bom_id: string;
+        material_id: string;
+        quantity_per_unit_scaled: number;
+        bom_unit: string;
+        quantity_basis: string;
+        material_code: string;
+        material_name: string;
+        material_unit: string;
+        category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+        material_is_active: number;
+        available_scaled: number;
+      }>)
+    : [];
+
+  if (bomHeader && lines.length === 0) {
+    bomStatus = 'MISSING_BOM';
+  }
+
+  return { bomHeader, bomStatus, lines };
+}
+
 export function uid(prefix: string): string {
   return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -326,17 +478,6 @@ export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
           },
         ];
 
-  const bomStmt = db.prepare(
-    `SELECT b.material_id, b.quantity_per_unit_scaled,
-            m.sku AS material_code, m.name AS material_name, m.unit, m.category,
-            sb.quantity_scaled AS available_scaled
-     FROM bom_items b
-     JOIN inventory_items m ON m.id = b.material_id
-     JOIN stock_balances sb ON sb.item_id = m.id
-     WHERE b.product_id = ?
-     ORDER BY m.category, m.name`
-  );
-
   const checkedAt = new Date().toISOString();
 
   // Track aggregated BOM demand across all shortage items in the order
@@ -351,6 +492,7 @@ export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
       quantityPerUnit: number;
       requiredScaled: number;
       availableScaled: number;
+      isMaterialActive: boolean;
     }
   >();
 
@@ -359,6 +501,7 @@ export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
     const availableScaled = Math.max(0, item.fg_stock_scaled);
     const shortageScaled = Math.max(0, remainingScaled - availableScaled);
     const productionRequired = shortageScaled > 0;
+    const { bomHeader, bomStatus, lines: bomRows } = getProductBomSnapshot(db, item.product_id);
 
     if (!productionRequired) {
       return {
@@ -373,6 +516,9 @@ export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
         availableFinishedStock: fromScaledQty(availableScaled),
         shortageQuantity: 0,
         productionRequired: false,
+        bomId: bomHeader?.id,
+        bomVersion: bomHeader?.bom_version,
+        bomStatus,
         rawMaterialAvailability: 'NOT_APPLICABLE' as const,
         bomBreakdown: [],
         materialsRequiringPurchase: [],
@@ -387,6 +533,7 @@ export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
           availableStock: number;
           shortfallQuantity: number;
           isSufficient: boolean;
+          isMaterialActive: boolean;
           _requiredScaled: number;
           _availableScaled: number;
           _shortfallScaled: number;
@@ -394,36 +541,56 @@ export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
       };
     }
 
-    const bomRows = bomStmt.all(item.product_id) as Array<{
-      material_id: string;
-      quantity_per_unit_scaled: number;
-      material_code: string;
-      material_name: string;
-      unit: string;
-      category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
-      available_scaled: number;
-    }>;
+    if (bomStatus !== 'APPROVED' || bomRows.length === 0) {
+      return {
+        orderItemId: item.id,
+        productId: item.product_id,
+        productName: item.product_name,
+        sku: item.sku,
+        unit: item.unit,
+        imageUrl: item.image_url || undefined,
+        requestedQuantity: fromScaledQty(item.requested_qty_scaled),
+        remainingToFulfill: fromScaledQty(remainingScaled),
+        availableFinishedStock: fromScaledQty(availableScaled),
+        shortageQuantity: fromScaledQty(shortageScaled),
+        productionRequired: true,
+        bomId: bomHeader?.id,
+        bomVersion: bomHeader?.bom_version,
+        bomStatus,
+        rawMaterialAvailability: 'MISSING_BOM' as const,
+        bomBreakdown: [],
+        materialsRequiringPurchase: [],
+        _internalBom: [],
+      };
+    }
 
     const itemBom = bomRows.map((row) => {
-      const requiredScaled = Math.round(
-        (shortageScaled * row.quantity_per_unit_scaled) / 10000
+      const perUnitInMaterialUnit = convertBomQtyToMaterialUnit(
+        fromScaledQty(row.quantity_per_unit_scaled),
+        row.bom_unit || row.material_unit,
+        row.material_unit
       );
+      const perUnitScaled = toScaledQty(perUnitInMaterialUnit);
+      const requiredScaled = Math.round((shortageScaled * perUnitScaled) / 10000);
       const matAvailableScaled = Math.max(0, row.available_scaled);
       const shortfallScaled = Math.max(0, requiredScaled - matAvailableScaled);
+      const isMaterialActive = row.material_is_active === 1;
 
       const existingAgg = aggregatedBomMap.get(row.material_id);
       if (existingAgg) {
         existingAgg.requiredScaled += requiredScaled;
+        existingAgg.isMaterialActive = existingAgg.isMaterialActive && isMaterialActive;
       } else {
         aggregatedBomMap.set(row.material_id, {
           rawMaterialId: row.material_id,
           materialCode: row.material_code,
           materialName: row.material_name,
           category: row.category,
-          unit: row.unit,
-          quantityPerUnit: fromScaledQty(row.quantity_per_unit_scaled),
+          unit: row.material_unit,
+          quantityPerUnit: perUnitInMaterialUnit,
           requiredScaled,
           availableScaled: matAvailableScaled,
+          isMaterialActive,
         });
       }
 
@@ -432,12 +599,13 @@ export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
         materialCode: row.material_code,
         materialName: row.material_name,
         category: row.category,
-        unit: row.unit,
-        quantityPerUnit: fromScaledQty(row.quantity_per_unit_scaled),
+        unit: row.material_unit,
+        quantityPerUnit: perUnitInMaterialUnit,
         requiredQuantity: fromScaledQty(requiredScaled),
         availableStock: fromScaledQty(matAvailableScaled),
         shortfallQuantity: fromScaledQty(shortfallScaled),
         isSufficient: shortfallScaled === 0,
+        isMaterialActive,
         _requiredScaled: requiredScaled,
         _availableScaled: matAvailableScaled,
         _shortfallScaled: shortfallScaled,
@@ -457,6 +625,9 @@ export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
       availableFinishedStock: fromScaledQty(availableScaled),
       shortageQuantity: fromScaledQty(shortageScaled),
       productionRequired: true,
+      bomId: bomHeader?.id,
+      bomVersion: bomHeader?.bom_version,
+      bomStatus: 'APPROVED' as const,
       rawMaterialAvailability:
         itemPurchase.length === 0 ? ('SUFFICIENT' as const) : ('INSUFFICIENT' as const),
       bomBreakdown: itemBom.map(
@@ -474,6 +645,9 @@ export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
   const totalAvailable = itemAnalyses.reduce((sum, i) => sum + i.availableFinishedStock, 0);
   const totalShortage = itemAnalyses.reduce((sum, i) => sum + i.shortageQuantity, 0);
   const anyProductionRequired = itemAnalyses.some((i) => i.productionRequired);
+  const missingBomItems = itemAnalyses.filter(
+    (i) => i.productionRequired && i.bomStatus !== 'APPROVED'
+  );
 
   const aggregatedBom = Array.from(aggregatedBomMap.values()).map((agg) => {
     const shortfallScaled = Math.max(0, agg.requiredScaled - agg.availableScaled);
@@ -488,6 +662,7 @@ export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
       availableStock: fromScaledQty(agg.availableScaled),
       shortfallQuantity: fromScaledQty(shortfallScaled),
       isSufficient: shortfallScaled === 0,
+      isMaterialActive: agg.isMaterialActive,
       _requiredScaled: agg.requiredScaled,
       _availableScaled: agg.availableScaled,
       _shortfallScaled: shortfallScaled,
@@ -497,9 +672,19 @@ export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
   const aggregatedPurchase = aggregatedBom.filter((b) => !b.isSufficient);
   const overallRawAvailability = !anyProductionRequired
     ? ('NOT_APPLICABLE' as const)
-    : aggregatedPurchase.length === 0
-      ? ('SUFFICIENT' as const)
-      : ('INSUFFICIENT' as const);
+    : missingBomItems.length > 0
+      ? ('MISSING_BOM' as const)
+      : aggregatedPurchase.length === 0
+        ? ('SUFFICIENT' as const)
+        : ('INSUFFICIENT' as const);
+
+  const overallReviewStatus = !anyProductionRequired
+    ? ('STOCK_AVAILABLE' as const)
+    : missingBomItems.length > 0
+      ? ('MISSING_BOM' as const)
+      : aggregatedPurchase.length === 0
+        ? ('READY_FOR_PRODUCTION' as const)
+        : ('MATERIAL_SHORTAGE' as const);
 
   const summaryProductName =
     itemAnalyses.length > 1
@@ -517,6 +702,12 @@ export function evaluateOrderAvailability(db: DatabaseSync, orderId: string) {
     shortageQuantity: totalShortage,
     productionRequired: anyProductionRequired,
     rawMaterialAvailability: overallRawAvailability,
+    overallReviewStatus,
+    missingBomProducts: missingBomItems.map((i) => ({
+      productId: i.productId,
+      productName: i.productName,
+      bomStatus: i.bomStatus,
+    })),
     bomBreakdown: aggregatedBom.map(
       ({ _requiredScaled, _availableScaled, _shortfallScaled, ...rest }) => rest
     ),
@@ -572,9 +763,9 @@ export function recalculateOpenShortageQueries(
 
   for (const prId of affectedPrIds) {
     const pr = db
-      .prepare(`SELECT id, status, product_id, requested_qty_scaled FROM production_requests WHERE id = ?`)
+      .prepare(`SELECT id, status, product_id, bom_id, requested_qty_scaled FROM production_requests WHERE id = ?`)
       .get(prId) as
-      | { id: string; status: string; product_id: string; requested_qty_scaled: number }
+      | { id: string; status: string; product_id: string; bom_id: string | null; requested_qty_scaled: number }
       | undefined;
     if (
       !pr ||
@@ -593,25 +784,16 @@ export function recalculateOpenShortageQueries(
       .get(prId) as { cnt: number };
 
     if (remainingShortages.cnt === 0) {
-      // Double check live BOM stocks
-      const bomCheck = db
-        .prepare(
-          `SELECT b.quantity_per_unit_scaled, sb.quantity_scaled AS available_scaled
-           FROM bom_items b
-           JOIN stock_balances sb ON sb.item_id = b.material_id
-           WHERE b.product_id = ?`
-        )
-        .all(pr.product_id) as Array<{
-        quantity_per_unit_scaled: number;
-        available_scaled: number;
-      }>;
+      const { lines: bomCheck } = getProductBomSnapshot(db, pr.product_id, pr.bom_id);
 
-      const allSufficient = bomCheck.every((line) => {
-        const reqScaled = Math.round(
-          (pr.requested_qty_scaled * line.quantity_per_unit_scaled) / 10000
-        );
-        return line.available_scaled >= reqScaled;
-      });
+      const allSufficient =
+        bomCheck.length > 0 &&
+        bomCheck.every((line) => {
+          const reqScaled = Math.round(
+            (pr.requested_qty_scaled * line.quantity_per_unit_scaled) / 10000
+          );
+          return line.available_scaled >= reqScaled;
+        });
 
       if (allSufficient) {
         db.prepare(
@@ -905,6 +1087,15 @@ export function submitOrderDecision(
         (ia) => ia.shortageQuantity > 0
       );
 
+      for (const item of shortageItems) {
+        if (item.bomStatus !== 'APPROVED') {
+          throw new HttpError(
+            400,
+            `Product ${item.productName} does not have an approved predefined BOM. Configure and approve its BOM before creating a production request.`
+          );
+        }
+      }
+
       const createdRequestNumbers: string[] = [];
       const createdRequestIds: string[] = [];
 
@@ -942,14 +1133,15 @@ export function submitOrderDecision(
 
         db.prepare(
           `INSERT INTO production_requests (
-            id, request_number, order_id, product_id, requested_qty_scaled,
+            id, request_number, order_id, product_id, bom_id, requested_qty_scaled,
             status, assigned_supervisor_id, supervisor_status, created_at, created_by, notes, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`
         ).run(
           prId,
           requestNumber,
           order.id,
           item.productId,
+          item.bomId || null,
           toScaledQty(item.shortageQuantity),
           prStatus,
           supStatus,
@@ -1082,6 +1274,7 @@ export function listInventoryItems(db: DatabaseSync) {
     .prepare(
       `SELECT b.material_id, p.id AS product_id, p.name AS product_name, p.sku AS product_sku, b.quantity_per_unit_scaled, p.unit AS product_unit
        FROM bom_items b
+       JOIN boms bm ON bm.id = b.bom_id AND bm.approval_status = 'APPROVED'
        JOIN inventory_items p ON p.id = b.product_id
        WHERE p.is_active = 1
        ORDER BY p.name`
@@ -1190,12 +1383,14 @@ export function listProductionRequests(db: DatabaseSync) {
   const rows = db
     .prepare(
       `SELECT pr.*, o.order_number, c.name AS customer_name,
-              p.name AS product_name, p.sku AS product_sku, p.unit, p.bom_version,
+              p.name AS product_name, p.sku AS product_sku, p.unit,
+              COALESCE(bm.bom_version, p.bom_version) AS effective_bom_version,
               u.full_name AS assigned_supervisor_name
        FROM production_requests pr
        JOIN orders o ON o.id = pr.order_id
        JOIN customers c ON c.id = o.customer_id
        JOIN inventory_items p ON p.id = pr.product_id
+       LEFT JOIN boms bm ON bm.id = pr.bom_id
        LEFT JOIN users u ON u.id = pr.assigned_supervisor_id
        ORDER BY pr.created_at DESC`
     )
@@ -1206,10 +1401,11 @@ export function listProductionRequests(db: DatabaseSync) {
     order_number: string;
     customer_name: string;
     product_id: string;
+    bom_id: string | null;
     product_name: string;
     product_sku: string;
     unit: string;
-    bom_version: string;
+    effective_bom_version: string;
     requested_qty_scaled: number;
     status: string;
     priority: string;
@@ -1231,17 +1427,6 @@ export function listProductionRequests(db: DatabaseSync) {
      WHERE q.production_request_id = ?`
   );
 
-  const bomStmt = db.prepare(
-    `SELECT b.material_id, b.quantity_per_unit_scaled,
-            m.name AS material_name, m.sku AS material_code, m.unit, m.category,
-            sb.quantity_scaled AS available_scaled
-     FROM bom_items b
-     JOIN inventory_items m ON m.id = b.material_id
-     JOIN stock_balances sb ON sb.item_id = m.id
-     WHERE b.product_id = ?
-     ORDER BY m.category, m.name`
-  );
-
   return rows.map((r) => {
     const queries = queryStmt.all(r.id) as Array<{
       id: string;
@@ -1252,15 +1437,7 @@ export function listProductionRequests(db: DatabaseSync) {
       status: string;
     }>;
 
-    const bomRows = bomStmt.all(r.product_id) as Array<{
-      material_id: string;
-      quantity_per_unit_scaled: number;
-      material_name: string;
-      material_code: string;
-      unit: string;
-      category: string;
-      available_scaled: number;
-    }>;
+    const { bomHeader, lines: bomRows } = getProductBomSnapshot(db, r.product_id, r.bom_id);
 
     const materialsToPurchase = queries
       .filter((q) => q.status !== 'RESOLVED' && q.shortage_qty_scaled > 0)
@@ -1280,7 +1457,7 @@ export function listProductionRequests(db: DatabaseSync) {
         materialCode: b.material_code,
         materialName: b.material_name,
         category: b.category,
-        unit: b.unit,
+        unit: b.material_unit,
         quantityPerUnit: fromScaledQty(b.quantity_per_unit_scaled),
         requiredQuantity: fromScaledQty(reqScaled),
         availableStock: fromScaledQty(b.available_scaled),
@@ -1300,7 +1477,8 @@ export function listProductionRequests(db: DatabaseSync) {
       productName: r.product_name,
       productSku: r.product_sku,
       unit: r.unit,
-      bomVersion: r.bom_version || 'v1.0',
+      bomId: bomHeader?.id || r.bom_id || undefined,
+      bomVersion: bomHeader?.bom_version || r.effective_bom_version || 'v1.0',
       requestedQuantity: fromScaledQty(r.requested_qty_scaled),
       rawMaterialAvailability: hasInsufficientLive ? ('INSUFFICIENT' as const) : ('SUFFICIENT' as const),
       materialsToPurchase,
@@ -2089,6 +2267,7 @@ export function postProductionRunBySupervisor(
           request_number: string;
           order_id: string;
           product_id: string;
+          bom_id: string | null;
           requested_qty_scaled: number;
           status: string;
           started_at: string;
@@ -2115,6 +2294,13 @@ export function postProductionRunBySupervisor(
     const prodRow = db
       .prepare(`SELECT name, bom_version FROM inventory_items WHERE id = ?`)
       .get(pr.product_id) as { name: string; bom_version: string } | undefined;
+
+    const { bomHeader, lines: bomRows } = getProductBomSnapshot(
+      db,
+      pr.product_id,
+      pr.bom_id
+    );
+    const effectiveBomVersion = bomHeader?.bom_version || prodRow?.bom_version || 'v1.0';
 
     const goodOutputValue = input.goodOutputQuantity ?? input.actualOutputQuantity ?? 0;
     if (goodOutputValue < 0 || (input.rejectedQuantity ?? 0) < 0 || (input.wastageQuantity ?? 0) < 0) {
@@ -2144,18 +2330,19 @@ export function postProductionRunBySupervisor(
 
     db.prepare(
       `INSERT INTO production_runs (
-        id, run_number, production_request_id, product_id, bom_version,
+        id, run_number, production_request_id, product_id, bom_id, bom_version,
         planned_qty_scaled, actual_output_qty_scaled, rejected_qty_scaled,
         wastage_qty_scaled, damaged_packaging_qty_scaled, variance_qty_scaled,
         yield_percent_bps, quality_result, status, supervisor_user_id, supervisor_name,
         created_by_name, started_at, completed_at, posted_at, notes, variance_explanation, idempotency_key
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       runId,
       runNumber,
       pr.id,
       pr.product_id,
-      prodRow?.bom_version || 'v1.0',
+      bomHeader?.id || pr.bom_id || null,
+      effectiveBomVersion,
       pr.requested_qty_scaled,
       actualOutputScaled,
       rejectedScaled,
@@ -2175,15 +2362,6 @@ export function postProductionRunBySupervisor(
       input.varianceExplanation?.trim() || '',
       input.idempotencyKey || null
     );
-
-    const bomRows = db
-      .prepare(
-        `SELECT material_id, quantity_per_unit_scaled FROM bom_items WHERE product_id = ?`
-      )
-      .all(pr.product_id) as Array<{
-      material_id: string;
-      quantity_per_unit_scaled: number;
-    }>;
 
     const overrideMap = new Map(
       (input.consumptions ?? []).map((c) => [c.materialId, c])
@@ -3259,39 +3437,298 @@ export function recordPaymentByAccountant(
 // Management Master Data (Product Catalogue + BOM, Customers, Suppliers, Users)
 // ---------------------------------------------------------------------------
 
-export function listProductsWithBom(db: DatabaseSync) {
-  const products = listInventoryItems(db).filter((i) => i.category === 'FINISHED_GOOD');
-  const bomStmt = db.prepare(
-    `SELECT b.id, b.material_id, b.quantity_per_unit_scaled,
-            m.name AS material_name, m.sku AS material_sku, m.unit, m.category
-     FROM bom_items b
-     JOIN inventory_items m ON m.id = b.material_id
-     WHERE b.product_id = ?
-     ORDER BY m.category, m.name`
+export function listMaterialsCatalogue(db: DatabaseSync) {
+  return listInventoryItems(db).filter(
+    (i) => i.category === 'RAW_MATERIAL' || i.category === 'PACKAGING_MATERIAL'
   );
+}
 
-  return products.map((p) => ({
-    ...p,
-    bomItems: (
-      bomStmt.all(p.id) as Array<{
-        id: string;
-        material_id: string;
-        material_name: string;
-        material_sku: string;
-        unit: string;
-        category: string;
-        quantity_per_unit_scaled: number;
-      }>
-    ).map((b) => ({
-      id: b.id,
-      materialId: b.material_id,
-      materialName: b.material_name,
-      materialSku: b.material_sku,
-      unit: b.unit,
-      category: b.category,
-      quantityPerUnit: fromScaledQty(b.quantity_per_unit_scaled),
+export function upsertMaterial(
+  db: DatabaseSync,
+  actor: AuthUser,
+  input: {
+    id?: string;
+    sku: string;
+    name: string;
+    category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+    unit: string;
+    reorderLevel: number;
+    isActive?: boolean;
+    sourceProductProposalId?: string;
+    sourceMaterialProposalId?: string;
+  }
+) {
+  requireRole(actor, ['ADMIN']);
+
+  const sku = (input.sku ?? '').trim();
+  const name = (input.name ?? '').trim();
+  const unit = (input.unit ?? '').trim();
+  if (!sku || !name || !unit) {
+    throw new HttpError(400, 'Material SKU, name, and unit of measure are required.');
+  }
+  if (input.category !== 'RAW_MATERIAL' && input.category !== 'PACKAGING_MATERIAL') {
+    throw new HttpError(400, 'Category must be RAW_MATERIAL or PACKAGING_MATERIAL.');
+  }
+  if (!Number.isFinite(input.reorderLevel) || input.reorderLevel < 0) {
+    throw new HttpError(400, 'Reorder level must be zero or a positive number.');
+  }
+
+  return runInTransaction(db, () => {
+    const nowIso = new Date().toISOString();
+    const isEdit = Boolean(input.id);
+    const materialId = input.id || uid(input.category === 'RAW_MATERIAL' ? 'rm' : 'pkg');
+
+    const dupSku = db
+      .prepare(
+        `SELECT id, name FROM inventory_items WHERE LOWER(TRIM(sku)) = LOWER(TRIM(?))`
+      )
+      .get(sku) as { id: string; name: string } | undefined;
+    if (dupSku && dupSku.id !== materialId) {
+      throw new HttpError(
+        409,
+        `Material SKU '${sku}' is already assigned to ${dupSku.name}. Duplicate SKUs are not allowed.`
+      );
+    }
+
+    if (isEdit) {
+      const existing = db
+        .prepare(
+          `SELECT id, name, category, unit FROM inventory_items WHERE id = ? AND category IN ('RAW_MATERIAL', 'PACKAGING_MATERIAL')`
+        )
+        .get(materialId) as
+        | { id: string; name: string; category: string; unit: string }
+        | undefined;
+      if (!existing) {
+        throw new HttpError(404, `Material ${materialId} not found.`);
+      }
+      if (
+        existing.name.trim() !== name ||
+        existing.category !== input.category ||
+        existing.unit.trim() !== unit
+      ) {
+        throw new HttpError(
+          403,
+          'Admin cannot independently alter verified material name, category, or unit of measurement.'
+        );
+      }
+      db.prepare(
+        `UPDATE inventory_items
+         SET sku = ?, reorder_level_scaled = ?, is_active = ?, updated_at = ?
+         WHERE id = ?`
+      ).run(
+        sku,
+        toScaledQty(input.reorderLevel),
+        input.isActive === false ? 0 : 1,
+        nowIso,
+        materialId
+      );
+    } else {
+      // Governance: Admin must register new materials strictly from an approved proposal
+      let verifiedSourceId: string | null = null;
+      if (input.sourceProductProposalId?.trim()) {
+        const pp = db
+          .prepare(
+            `SELECT id, status FROM product_proposals WHERE id = ? AND status = 'APPROVED_PENDING_REGISTRATION'`
+          )
+          .get(input.sourceProductProposalId.trim()) as { id: string } | undefined;
+        if (!pp) {
+          throw new HttpError(
+            403,
+            'Referenced product proposal is not approved for material registration.'
+          );
+        }
+        verifiedSourceId = pp.id;
+      } else if (input.sourceMaterialProposalId?.trim()) {
+        const mp = db
+          .prepare(
+            `SELECT id, status FROM material_proposals WHERE id = ? AND status = 'APPROVED'`
+          )
+          .get(input.sourceMaterialProposalId.trim()) as { id: string } | undefined;
+        if (!mp) {
+          throw new HttpError(
+            403,
+            'Referenced material proposal is not approved for Material Catalogue registration.'
+          );
+        }
+      } else {
+        throw new HttpError(
+          403,
+          'Admin cannot add unverified raw or packaging materials independently. Materials must originate from an approved Product Proposal or Production Supervisor Material Proposal.'
+        );
+      }
+
+      // Strictly initializes stock balance at 0; never auto-creates stock!
+      db.prepare(
+        `INSERT INTO inventory_items (
+          id, sku, name, category, unit, pack_size, selling_price_paise,
+          gst_rate_bps, hsn_code, image_url, reorder_level_scaled, is_active, source_proposal_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, '', 0, 0, '', '', ?, ?, ?, ?, ?)`
+      ).run(
+        materialId,
+        sku,
+        name,
+        input.category,
+        unit,
+        toScaledQty(input.reorderLevel),
+        input.isActive === false ? 0 : 1,
+        verifiedSourceId,
+        nowIso,
+        nowIso
+      );
+
+      db.prepare(
+        `INSERT INTO stock_balances (item_id, quantity_scaled, updated_at) VALUES (?, 0, ?)`
+      ).run(materialId, nowIso);
+    }
+
+    recordAuditLog(
+      db,
+      actor,
+      'MATERIAL',
+      materialId,
+      isEdit ? 'UPDATE_MATERIAL' : 'CREATE_MATERIAL',
+      `${sku} (${name}, ${input.category})`
+    );
+
+    return { id: materialId };
+  });
+}
+
+export function setMaterialActiveStatus(
+  db: DatabaseSync,
+  actor: AuthUser,
+  materialId: string,
+  isActive: boolean
+) {
+  requireRole(actor, ['ADMIN']);
+  const nowIso = new Date().toISOString();
+  const res = db
+    .prepare(
+      `UPDATE inventory_items
+       SET is_active = ?, updated_at = ?
+       WHERE id = ? AND category IN ('RAW_MATERIAL', 'PACKAGING_MATERIAL')`
+    )
+    .run(isActive ? 1 : 0, nowIso, materialId);
+  if (res.changes === 0) throw new HttpError(404, 'Material not found.');
+  recordAuditLog(db, actor, 'MATERIAL', materialId, isActive ? 'ACTIVATE' : 'DEACTIVATE', '');
+  return { id: materialId, isActive };
+}
+
+export function deleteMaterial(db: DatabaseSync, actor: AuthUser, materialId: string) {
+  requireRole(actor, ['ADMIN']);
+  return runInTransaction(db, () => {
+    const existing = db
+      .prepare(
+        `SELECT ii.id, ii.name, COALESCE(sb.quantity_scaled, 0) AS stock_scaled
+         FROM inventory_items ii
+         LEFT JOIN stock_balances sb ON sb.item_id = ii.id
+         WHERE ii.id = ? AND ii.category IN ('RAW_MATERIAL', 'PACKAGING_MATERIAL')`
+      )
+      .get(materialId) as { id: string; name: string; stock_scaled: number } | undefined;
+
+    if (!existing) {
+      throw new HttpError(404, `Material ${materialId} not found.`);
+    }
+    if (existing.stock_scaled > 0) {
+      throw new HttpError(
+        409,
+        `Material '${existing.name}' still has available inventory stock. Use inactive status instead of deleting.`
+      );
+    }
+
+    const refTables: Array<[string, string]> = [
+      ['bom_items', 'material_id'],
+      ['product_proposal_bom_items', 'material_id'],
+      ['product_proposal_bom_items', 'created_material_id'],
+      ['stock_movements', 'item_id'],
+      ['purchase_order_items', 'item_id'],
+      ['purchase_receipt_items', 'item_id'],
+      ['material_shortage_queries', 'material_id'],
+      ['production_run_consumptions', 'material_id'],
+      ['material_purchase_requirements', 'material_id'],
+      ['supplier_materials', 'item_id'],
+      ['bom_revision_requests', 'material_id'],
+    ];
+
+    for (const [table, col] of refTables) {
+      const ref = db
+        .prepare(`SELECT 1 AS hit FROM ${table} WHERE ${col} = ? LIMIT 1`)
+        .get(materialId);
+      if (ref) {
+        throw new HttpError(
+          409,
+          `Material '${existing.name}' cannot be deleted because it is already referenced by products, BOMs, or transactions. Mark it as Inactive instead.`
+        );
+      }
+    }
+
+    db.prepare(`UPDATE material_proposals SET created_material_id = NULL WHERE created_material_id = ?`).run(
+      materialId
+    );
+    db.prepare(`DELETE FROM stock_balances WHERE item_id = ?`).run(materialId);
+    db.prepare(`DELETE FROM inventory_items WHERE id = ?`).run(materialId);
+    recordAuditLog(db, actor, 'MATERIAL', materialId, 'DELETE_MATERIAL', existing.name);
+    return { id: materialId, deleted: true };
+  });
+}
+
+export function listProductBomHistory(db: DatabaseSync, productId: string) {
+  const boms = db
+    .prepare(
+      `SELECT * FROM boms WHERE product_id = ? ORDER BY created_at DESC, rowid DESC`
+    )
+    .all(productId) as BomHeaderRow[];
+
+  return boms.map((b) => ({
+    id: b.id,
+    productId: b.product_id,
+    bomVersion: b.bom_version,
+    approvalStatus: b.approval_status,
+    quantityBasis: b.quantity_basis || 'PER_UNIT',
+    effectiveDate: b.effective_date,
+    notes: b.notes || undefined,
+    approvedBy: b.approved_by || undefined,
+    createdBy: b.created_by || undefined,
+    createdAt: b.created_at,
+    items: getProductBomSnapshot(db, productId, b.id).lines.map((line) => ({
+      id: line.id,
+      materialId: line.material_id,
+      materialName: line.material_name,
+      materialSku: line.material_code,
+      unit: line.material_unit,
+      category: line.category,
+      quantityPerUnit: fromScaledQty(line.quantity_per_unit_scaled),
+      quantityBasis: line.quantity_basis || 'PER_UNIT',
+      isMaterialActive: line.material_is_active === 1,
     })),
   }));
+}
+
+export function listProductsWithBom(db: DatabaseSync) {
+  const products = listInventoryItems(db).filter((i) => i.category === 'FINISHED_GOOD');
+
+  return products.map((p) => {
+    const header = getLatestBomHeader(db, p.id);
+    const lines = header ? getProductBomSnapshot(db, p.id, header.id).lines : [];
+    return {
+      ...p,
+      bomId: header?.id,
+      bomApprovalStatus: header?.approval_status ?? (lines.length === 0 ? undefined : 'APPROVED'),
+      bomEffectiveDate: header?.effective_date,
+      bomQuantityBasis: header?.quantity_basis ?? 'PER_UNIT',
+      bomItems: lines.map((b) => ({
+        id: b.id,
+        materialId: b.material_id,
+        materialName: b.material_name,
+        materialSku: b.material_code,
+        unit: b.material_unit,
+        category: b.category,
+        quantityPerUnit: fromScaledQty(b.quantity_per_unit_scaled),
+        quantityBasis: b.quantity_basis || 'PER_UNIT',
+        isMaterialActive: b.material_is_active === 1,
+      })),
+    };
+  });
 }
 
 export function upsertProductAndBom(
@@ -3309,15 +3746,34 @@ export function upsertProductAndBom(
     unit: string;
     reorderLevel: number;
     isActive?: boolean;
-    bomItems: Array<{ materialId: string; quantityPerUnit: number }>;
+    bomApprovalStatus?: 'APPROVED' | 'DRAFT';
+    bomEffectiveDate?: string;
+    bomItems: Array<{ materialId: string; quantityPerUnit: number; unit?: string }>;
   }
 ) {
   requireRole(actor, ['ADMIN']);
 
-  if (!input.sku?.trim() || !input.name?.trim() || !input.unit?.trim() || !input.hsnCode?.trim()) {
+  const sku = (input.sku ?? '').trim();
+  const name = (input.name ?? '').trim();
+  const unit = (input.unit ?? '').trim();
+  const hsnCode = (input.hsnCode ?? '').trim();
+  if (!sku || !name || !unit || !hsnCode) {
     throw new HttpError(400, 'SKU, product name, unit of measurement, and HSN code are required.');
   }
+  if (!Number.isFinite(input.sellingPrice) || input.sellingPrice < 0) {
+    throw new HttpError(400, 'Selling price must be zero or positive.');
+  }
+  if (!Number.isFinite(input.gstRate) || input.gstRate < 0 || input.gstRate > 28) {
+    throw new HttpError(400, 'GST rate must be between 0% and 28%.');
+  }
+  if (!Number.isFinite(input.reorderLevel) || input.reorderLevel < 0) {
+    throw new HttpError(400, 'Reorder level cannot be negative.');
+  }
 
+  const requestedApprovalStatus: 'APPROVED' | 'DRAFT' =
+    input.bomApprovalStatus === 'DRAFT' ? 'DRAFT' : 'APPROVED';
+  const effectiveDate =
+    input.bomEffectiveDate?.trim() || new Date().toISOString().slice(0, 10);
   const normalizedImageUrl = normalizeProductImageUrl(input.imageUrl);
 
   return runInTransaction(db, () => {
@@ -3325,105 +3781,168 @@ export function upsertProductAndBom(
     const productId = input.id || uid('prod');
     const isEdit = Boolean(input.id);
     let previousImageUrl = '';
+
+    // Prevent duplicate product SKU (case-insensitive)
+    const dupSku = db
+      .prepare(`SELECT id, name FROM inventory_items WHERE LOWER(TRIM(sku)) = LOWER(TRIM(?))`)
+      .get(sku) as { id: string; name: string } | undefined;
+    if (dupSku && dupSku.id !== productId) {
+      throw new HttpError(
+        409,
+        `Product SKU '${sku}' is already assigned to ${dupSku.name}. Duplicate SKUs are not allowed.`
+      );
+    }
+
+    // Validate BOM lines strictly upfront
+    const seenMaterials = new Set<string>();
+    const validatedBomLines: Array<{
+      materialId: string;
+      materialName: string;
+      materialUnit: string;
+      isActive: boolean;
+      qtyScaled: number;
+    }> = [];
+
+    for (const line of input.bomItems ?? []) {
+      const matId = (line.materialId ?? '').trim();
+      if (!matId) {
+        throw new HttpError(400, 'Each BOM component must select an existing material.');
+      }
+      if (seenMaterials.has(matId)) {
+        throw new HttpError(
+          400,
+          'Duplicate material entry is not allowed within the same BOM version.'
+        );
+      }
+      seenMaterials.add(matId);
+
+      const mat = db
+        .prepare(
+          `SELECT id, name, unit, category, is_active FROM inventory_items WHERE id = ?`
+        )
+        .get(matId) as
+        | { id: string; name: string; unit: string; category: string; is_active: number }
+        | undefined;
+      if (!mat || mat.category === 'FINISHED_GOOD') {
+        throw new HttpError(400, 'BOM components must reference valid raw or packaging materials.');
+      }
+      if (!Number.isFinite(line.quantityPerUnit) || line.quantityPerUnit <= 0) {
+        throw new HttpError(
+          400,
+          `BOM quantity for ${mat.name} must be greater than zero.`
+        );
+      }
+
+      const convertedQty = convertBomQtyToMaterialUnit(
+        line.quantityPerUnit,
+        line.unit?.trim() || mat.unit,
+        mat.unit
+      );
+      const qScaled = toScaledQty(convertedQty);
+      if (qScaled <= 0) {
+        throw new HttpError(400, `BOM quantity for ${mat.name} is too small.`);
+      }
+
+      validatedBomLines.push({
+        materialId: mat.id,
+        materialName: mat.name,
+        materialUnit: mat.unit,
+        isActive: mat.is_active === 1,
+        qtyScaled: qScaled,
+      });
+    }
+
     let nextBomVersion = 'v1.0';
 
     if (isEdit) {
       const existing = db
         .prepare(
-          `SELECT id, image_url, bom_version FROM inventory_items WHERE id = ? AND category = 'FINISHED_GOOD'`
+          `SELECT id, sku, name, pack_size, selling_price_paise, gst_rate_bps, hsn_code,
+                  image_url, unit, reorder_level_scaled, bom_version
+           FROM inventory_items WHERE id = ? AND category = 'FINISHED_GOOD'`
         )
-        .get(productId) as { id: string; image_url: string; bom_version: string } | undefined;
+        .get(productId) as
+        | {
+            id: string;
+            sku: string;
+            name: string;
+            pack_size: string;
+            selling_price_paise: number;
+            gst_rate_bps: number;
+            hsn_code: string;
+            image_url: string;
+            unit: string;
+            reorder_level_scaled: number;
+            bom_version: string;
+          }
+        | undefined;
       if (!existing) {
         throw new HttpError(404, `Product ${productId} not found.`);
       }
       previousImageUrl = existing.image_url || '';
 
-      const existingBom = db
-        .prepare(`SELECT material_id, quantity_per_unit_scaled FROM bom_items WHERE product_id = ? ORDER BY material_id`)
-        .all(productId) as Array<{ material_id: string; quantity_per_unit_scaled: number }>;
-      const nextBomComparable = (input.bomItems ?? [])
-        .map((b) => `${b.materialId}:${toScaledQty(b.quantityPerUnit)}`)
+      // Enforce Admin Governance: Admin cannot silently change approved price, GST, HSN, reorder level, name/pack/unit, or BOM!
+      if (
+        existing.name.trim() !== name ||
+        existing.pack_size.trim() !== input.packSize.trim() ||
+        existing.unit.trim() !== unit ||
+        existing.selling_price_paise !== toPaise(input.sellingPrice) ||
+        existing.gst_rate_bps !== toGstBps(input.gstRate) ||
+        existing.hsn_code.trim() !== hsnCode ||
+        existing.reorder_level_scaled !== toScaledQty(input.reorderLevel)
+      ) {
+        throw new HttpError(
+          403,
+          'Admin cannot independently modify approved product specifications, selling price, GST rate, HSN code, or reorder level. Submit a correction request to the responsible department.'
+        );
+      }
+
+      const latestHeader = getLatestBomHeader(db, productId);
+      const existingBomRows = latestHeader
+        ? (db
+            .prepare(
+              `SELECT material_id, quantity_per_unit_scaled FROM bom_items WHERE bom_id = ? ORDER BY material_id`
+            )
+            .all(latestHeader.id) as Array<{
+            material_id: string;
+            quantity_per_unit_scaled: number;
+          }>)
+        : [];
+
+      const nextBomComparable = validatedBomLines
+        .map((b) => `${b.materialId}:${b.qtyScaled}`)
         .sort()
         .join('|');
-      const prevBomComparable = existingBom
+      const prevBomComparable = existingBomRows
         .map((b) => `${b.material_id}:${b.quantity_per_unit_scaled}`)
         .sort()
         .join('|');
-      nextBomVersion = existing.bom_version || 'v1.0';
+
       if (nextBomComparable !== prevBomComparable) {
-        const match = /^v(\d+)\.(\d+)$/.exec(nextBomVersion);
-        if (match) {
-          nextBomVersion = `v${match[1]}.${Number(match[2]) + 1}`;
-        } else {
-          nextBomVersion = `${nextBomVersion}.1`;
-        }
+        throw new HttpError(
+          403,
+          'Admin cannot modify an approved BOM directly. Production Supervisor must submit a BOM Revision Request for Owner approval.'
+        );
       }
+
+      nextBomVersion = existing.bom_version || 'v1.0';
 
       db.prepare(
         `UPDATE inventory_items
-         SET sku = ?, name = ?, pack_size = ?, selling_price_paise = ?, gst_rate_bps = ?,
-             hsn_code = ?, image_url = ?, unit = ?, reorder_level_scaled = ?, bom_version = ?, is_active = ?, updated_at = ?
+         SET sku = ?, image_url = ?, is_active = ?, updated_at = ?
          WHERE id = ?`
       ).run(
-        input.sku.trim(),
-        input.name.trim(),
-        input.packSize.trim(),
-        toPaise(input.sellingPrice),
-        toGstBps(input.gstRate),
-        input.hsnCode.trim(),
+        sku,
         normalizedImageUrl,
-        input.unit.trim(),
-        toScaledQty(input.reorderLevel),
-        nextBomVersion,
         input.isActive === false ? 0 : 1,
         nowIso,
         productId
       );
     } else {
-      // Adding a product MUST NOT create inventory or stock; balance initializes at 0!
-      db.prepare(
-        `INSERT INTO inventory_items (
-          id, sku, name, category, unit, pack_size, selling_price_paise,
-          gst_rate_bps, hsn_code, image_url, reorder_level_scaled, is_active, created_at, updated_at
-        ) VALUES (?, ?, ?, 'FINISHED_GOOD', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        productId,
-        input.sku.trim(),
-        input.name.trim(),
-        input.unit.trim(),
-        input.packSize.trim(),
-        toPaise(input.sellingPrice),
-        toGstBps(input.gstRate),
-        input.hsnCode.trim(),
-        normalizedImageUrl,
-        toScaledQty(input.reorderLevel),
-        input.isActive === false ? 0 : 1,
-        nowIso,
-        nowIso
+      throw new HttpError(
+        403,
+        'Admin cannot create a new product without an Owner-approved Product Proposal. Register products from Approved Proposals.'
       );
-
-      db.prepare(
-        `INSERT INTO stock_balances (item_id, quantity_scaled, updated_at) VALUES (?, 0, ?)`
-      ).run(productId, nowIso);
-    }
-
-    // Replace BOM items
-    db.prepare(`DELETE FROM bom_items WHERE product_id = ?`).run(productId);
-    const insertBom = db.prepare(
-      `INSERT INTO bom_items (id, product_id, material_id, quantity_per_unit_scaled) VALUES (?, ?, ?, ?)`
-    );
-    for (const line of input.bomItems ?? []) {
-      const mat = db
-        .prepare(`SELECT id, category FROM inventory_items WHERE id = ?`)
-        .get(line.materialId) as { id: string; category: string } | undefined;
-      if (!mat || mat.category === 'FINISHED_GOOD') {
-        throw new HttpError(400, 'BOM components must be raw or packaging materials.');
-      }
-      const qScaled = toScaledQty(line.quantityPerUnit);
-      if (qScaled <= 0) {
-        throw new HttpError(400, 'BOM quantity per unit must be greater than zero.');
-      }
-      insertBom.run(uid('bom'), productId, mat.id, qScaled);
     }
 
     if (previousImageUrl && previousImageUrl !== normalizedImageUrl) {
@@ -3436,10 +3955,10 @@ export function upsertProductAndBom(
       'PRODUCT',
       productId,
       isEdit ? 'UPDATE_PRODUCT' : 'CREATE_PRODUCT',
-      `${input.sku.trim()} (${input.name.trim()})`
+      `${sku} (${name}, BOM ${nextBomVersion} ${requestedApprovalStatus})`
     );
 
-    return { id: productId };
+    return { id: productId, bomVersion: nextBomVersion };
   });
 }
 
@@ -3450,15 +3969,42 @@ export function setProductActiveStatus(
   isActive: boolean
 ) {
   requireRole(actor, ['ADMIN']);
-  const nowIso = new Date().toISOString();
-  const res = db
-    .prepare(
-      `UPDATE inventory_items SET is_active = ?, updated_at = ? WHERE id = ? AND category = 'FINISHED_GOOD'`
-    )
-    .run(isActive ? 1 : 0, nowIso, productId);
-  if (res.changes === 0) throw new HttpError(404, 'Product not found.');
-  recordAuditLog(db, actor, 'PRODUCT', productId, isActive ? 'ACTIVATE' : 'DEACTIVATE', '');
-  return { id: productId, isActive };
+  return runInTransaction(db, () => {
+    const nowIso = new Date().toISOString();
+    const prod = db
+      .prepare(
+        `SELECT id, source_proposal_id FROM inventory_items WHERE id = ? AND category = 'FINISHED_GOOD'`
+      )
+      .get(productId) as { id: string; source_proposal_id: string | null } | undefined;
+    if (!prod) throw new HttpError(404, 'Product not found.');
+
+    if (isActive && prod.source_proposal_id) {
+      const prop = db
+        .prepare(`SELECT status, proposal_number FROM product_proposals WHERE id = ?`)
+        .get(prod.source_proposal_id) as { status: string; proposal_number: string } | undefined;
+      if (!prop || !['CATALOGUE_REGISTERED', 'ACTIVE'].includes(prop.status)) {
+        throw new HttpError(
+          403,
+          `Cannot activate product: proposal ${prop?.proposal_number ?? ''} is not approved and registered.`
+        );
+      }
+      if (prop.status === 'CATALOGUE_REGISTERED') {
+        db.prepare(
+          `UPDATE product_proposals
+           SET status = 'ACTIVE', activated_at = COALESCE(NULLIF(activated_at, ''), ?), updated_at = ?
+           WHERE id = ?`
+        ).run(nowIso, nowIso, prod.source_proposal_id);
+      }
+    }
+
+    db.prepare(`UPDATE inventory_items SET is_active = ?, updated_at = ? WHERE id = ?`).run(
+      isActive ? 1 : 0,
+      nowIso,
+      productId
+    );
+    recordAuditLog(db, actor, 'PRODUCT', productId, isActive ? 'ACTIVATE' : 'DEACTIVATE', '');
+    return { id: productId, isActive };
+  });
 }
 
 export function listCustomers(db: DatabaseSync) {

@@ -4,6 +4,8 @@ import { runInTransaction } from './db.ts';
 import { fromPaise, fromScaledQty, toScaledQty } from './moneyQty.ts';
 import {
   applyStockMovement,
+  bumpBomVersion,
+  getProductBomSnapshot,
   listInventoryItems,
   listProductionRequests,
   listProductionRuns,
@@ -12,14 +14,6 @@ import {
   recordAuditLog,
   uid,
 } from './services.ts';
-
-function bumpBomVersion(version: string): string {
-  const match = /^v(\d+)\.(\d+)$/.exec((version || 'v1.0').trim());
-  if (match) {
-    return `v${match[1]}.${Number(match[2]) + 1}`;
-  }
-  return `${version || 'v1.0'}.1`;
-}
 
 // ---------------------------------------------------------------------------
 // 1. Production Supervisor Dashboard
@@ -231,10 +225,11 @@ export function checkProductionRequestAvailability(
   return runInTransaction(db, () => {
     const pr = db
       .prepare(
-        `SELECT pr.id, pr.request_number, pr.order_id, pr.product_id, pr.requested_qty_scaled,
-                pr.status, p.name AS product_name, p.bom_version
+        `SELECT pr.id, pr.request_number, pr.order_id, pr.product_id, pr.bom_id, pr.requested_qty_scaled,
+                pr.status, p.name AS product_name, COALESCE(bm.bom_version, p.bom_version) AS bom_version
          FROM production_requests pr
          JOIN inventory_items p ON p.id = pr.product_id
+         LEFT JOIN boms bm ON bm.id = pr.bom_id
          WHERE pr.id = ?`
       )
       .get(requestId) as
@@ -243,6 +238,7 @@ export function checkProductionRequestAvailability(
           request_number: string;
           order_id: string;
           product_id: string;
+          bom_id: string | null;
           requested_qty_scaled: number;
           status: string;
           product_name: string;
@@ -261,25 +257,21 @@ export function checkProductionRequestAvailability(
       throw new HttpError(400, `Cannot check availability on ${pr.status} request.`);
     }
 
-    const bomLines = db
-      .prepare(
-        `SELECT b.material_id, b.quantity_per_unit_scaled,
-                m.sku, m.name, m.unit, m.category, sb.quantity_scaled AS available_scaled
-         FROM bom_items b
-         JOIN inventory_items m ON m.id = b.material_id
-         JOIN stock_balances sb ON sb.item_id = b.material_id
-         WHERE b.product_id = ?
-         ORDER BY m.category, m.name`
-      )
-      .all(pr.product_id) as Array<{
-      material_id: string;
-      quantity_per_unit_scaled: number;
-      sku: string;
-      name: string;
-      unit: string;
-      category: string;
-      available_scaled: number;
-    }>;
+    const { bomHeader, lines: rawBomLines } = getProductBomSnapshot(
+      db,
+      pr.product_id,
+      pr.bom_id
+    );
+    const effectiveBomVersion = bomHeader?.bom_version || pr.bom_version || 'v1.0';
+    const bomLines = rawBomLines.map((l) => ({
+      material_id: l.material_id,
+      quantity_per_unit_scaled: l.quantity_per_unit_scaled,
+      sku: l.material_code,
+      name: l.material_name,
+      unit: l.material_unit,
+      category: l.category,
+      available_scaled: l.available_scaled,
+    }));
 
     const nowIso = new Date().toISOString();
     let hasShortage = false;
@@ -400,7 +392,7 @@ export function checkProductionRequestAvailability(
     return {
       productionRequestId: pr.id,
       requestNumber: pr.request_number,
-      bomVersion: pr.bom_version,
+      bomVersion: effectiveBomVersion,
       rawMaterialAvailability: hasShortage ? ('INSUFFICIENT' as const) : ('SUFFICIENT' as const),
       nextStatus,
       bomBreakdown,
@@ -512,7 +504,7 @@ export function createMaterialPurchaseRequirement(
   return runInTransaction(db, () => {
     const pr = db
       .prepare(
-        `SELECT id, request_number, order_id, product_id, requested_qty_scaled, status
+        `SELECT id, request_number, order_id, product_id, bom_id, requested_qty_scaled, status
          FROM production_requests WHERE id = ?`
       )
       .get(input.productionRequestId) as
@@ -521,6 +513,7 @@ export function createMaterialPurchaseRequirement(
           request_number: string;
           order_id: string;
           product_id: string;
+          bom_id: string | null;
           requested_qty_scaled: number;
           status: string;
         }
@@ -565,9 +558,8 @@ export function createMaterialPurchaseRequirement(
       );
     }
 
-    const bomLine = db
-      .prepare(`SELECT quantity_per_unit_scaled FROM bom_items WHERE product_id = ? AND material_id = ?`)
-      .get(pr.product_id, mat.id) as { quantity_per_unit_scaled: number } | undefined;
+    const { lines: bomSnapshotLines } = getProductBomSnapshot(db, pr.product_id, pr.bom_id);
+    const bomLine = bomSnapshotLines.find((l) => l.material_id === mat.id);
 
     const bomReqScaled = bomLine
       ? Math.round((pr.requested_qty_scaled * bomLine.quantity_per_unit_scaled) / 10000)
@@ -1030,6 +1022,12 @@ export function listBomRevisionRequests(db: DatabaseSync, actor: AuthUser) {
     run_number: string | null;
     reason: string;
     status: 'PENDING_ADMIN_REVIEW' | 'APPROVED' | 'REJECTED';
+    affects_costing_or_tax: number;
+    accountant_verification_status: string;
+    accountant_verified_by: string;
+    owner_approval_status: string;
+    owner_approved_by: string;
+    owner_approved_at: string;
     requested_by_name: string;
     reviewed_by_name: string;
     review_note: string;
@@ -1055,6 +1053,12 @@ export function listBomRevisionRequests(db: DatabaseSync, actor: AuthUser) {
     runNumber: r.run_number || undefined,
     reason: r.reason,
     status: r.status,
+    affectsCostingOrTax: r.affects_costing_or_tax === 1,
+    accountantVerificationStatus: r.accountant_verification_status || 'NOT_REQUIRED',
+    accountantVerifiedBy: r.accountant_verified_by || undefined,
+    ownerApprovalStatus: r.owner_approval_status || 'PENDING_OWNER_APPROVAL',
+    ownerApprovedBy: r.owner_approved_by || undefined,
+    ownerApprovedAt: r.owner_approved_at || undefined,
     requestedByName: r.requested_by_name,
     reviewedByName: r.reviewed_by_name || undefined,
     reviewNote: r.review_note || undefined,
@@ -1071,6 +1075,7 @@ export function createBomRevisionRequest(
     materialId: string;
     suggestedQuantityPerUnit: number;
     productionRunId?: string;
+    affectsCostingOrTax?: boolean;
     reason: string;
   }
 ) {
@@ -1095,9 +1100,8 @@ export function createBomRevisionRequest(
       throw new HttpError(404, `Finished good ${input.productId} not found.`);
     }
 
-    const bomLine = db
-      .prepare(`SELECT quantity_per_unit_scaled FROM bom_items WHERE product_id = ? AND material_id = ?`)
-      .get(input.productId, input.materialId) as { quantity_per_unit_scaled: number } | undefined;
+    const { bomHeader, lines: approvedBomLines } = getProductBomSnapshot(db, product.id);
+    const bomLine = approvedBomLines.find((l) => l.material_id === input.materialId);
     if (!bomLine) {
       throw new HttpError(404, 'Specified material is not part of the product official BOM.');
     }
@@ -1110,23 +1114,28 @@ export function createBomRevisionRequest(
       'request_number',
       'BOMR-2026-'
     );
+    const affectsCostTax = input.affectsCostingOrTax ? 1 : 0;
 
     db.prepare(
       `INSERT INTO bom_revision_requests (
         id, request_number, product_id, bom_version, material_id,
         current_qty_per_unit_scaled, suggested_qty_per_unit_scaled,
-        production_run_id, reason, status, requested_by_user_id, requested_by_name, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_ADMIN_REVIEW', ?, ?, ?)`
+        production_run_id, reason, status,
+        affects_costing_or_tax, accountant_verification_status, owner_approval_status,
+        requested_by_user_id, requested_by_name, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_ADMIN_REVIEW', ?, ?, 'PENDING_OWNER_APPROVAL', ?, ?, ?)`
     ).run(
       id,
       requestNumber,
       product.id,
-      product.bom_version || 'v1.0',
+      bomHeader?.bom_version || product.bom_version || 'v1.0',
       input.materialId,
       bomLine.quantity_per_unit_scaled,
       toScaledQty(input.suggestedQuantityPerUnit),
       input.productionRunId || null,
       reason,
+      affectsCostTax,
+      affectsCostTax ? 'PENDING_ACCOUNTANT_REVIEW' : 'NOT_REQUIRED',
       actor.id,
       actor.fullName,
       nowIso
@@ -1138,10 +1147,107 @@ export function createBomRevisionRequest(
       'BOM_REVISION',
       id,
       'REQUEST_BOM_REVISION',
-      `${requestNumber} for ${product.name} (${product.bom_version || 'v1.0'}): suggested ${input.suggestedQuantityPerUnit} per unit`
+      `${requestNumber} for ${product.name} (${bomHeader?.bom_version || product.bom_version || 'v1.0'}): suggested ${input.suggestedQuantityPerUnit} per unit`
     );
 
     return { id, requestNumber };
+  });
+}
+
+export function verifyBomRevisionCostingByAccountant(
+  db: DatabaseSync,
+  actor: AuthUser,
+  revisionId: string,
+  approve: boolean,
+  note?: string
+) {
+  requireRole(actor, ['ACCOUNTANT']);
+  return runInTransaction(db, () => {
+    const reqRow = db
+      .prepare(`SELECT id, request_number, status FROM bom_revision_requests WHERE id = ?`)
+      .get(revisionId) as { id: string; request_number: string; status: string } | undefined;
+    if (!reqRow) throw new HttpError(404, 'BOM revision request not found.');
+    if (reqRow.status !== 'PENDING_ADMIN_REVIEW') {
+      throw new HttpError(400, `BOM revision ${reqRow.request_number} is already ${reqRow.status}.`);
+    }
+    const status = approve ? 'VERIFIED' : 'RETURNED';
+    db.prepare(
+      `UPDATE bom_revision_requests
+       SET accountant_verification_status = ?, accountant_verified_by = ?, review_note = COALESCE(NULLIF(?, ''), review_note)
+       WHERE id = ?`
+    ).run(status, actor.fullName, note?.trim() || '', revisionId);
+    recordAuditLog(db, actor, 'BOM_REVISION', revisionId, `BOM_REVISION_ACCOUNTANT_${status}`, reqRow.request_number);
+    return { id: revisionId, requestNumber: reqRow.request_number, accountantVerificationStatus: status };
+  });
+}
+
+export function approveBomRevisionByOwner(
+  db: DatabaseSync,
+  actor: AuthUser,
+  revisionId: string,
+  approve: boolean,
+  note?: string
+) {
+  requireRole(actor, ['OWNER_SUPER_ADMIN']);
+  return runInTransaction(db, () => {
+    const reqRow = db
+      .prepare(
+        `SELECT id, request_number, status, affects_costing_or_tax, accountant_verification_status
+         FROM bom_revision_requests WHERE id = ?`
+      )
+      .get(revisionId) as
+      | {
+          id: string;
+          request_number: string;
+          status: string;
+          affects_costing_or_tax: number;
+          accountant_verification_status: string;
+        }
+      | undefined;
+    if (!reqRow) throw new HttpError(404, 'BOM revision request not found.');
+    if (reqRow.status !== 'PENDING_ADMIN_REVIEW') {
+      throw new HttpError(400, `BOM revision ${reqRow.request_number} is already ${reqRow.status}.`);
+    }
+    if (
+      approve &&
+      reqRow.affects_costing_or_tax === 1 &&
+      reqRow.accountant_verification_status !== 'VERIFIED'
+    ) {
+      throw new HttpError(
+        400,
+        'Accountant costing/tax verification is required before Owner approval for this BOM revision.'
+      );
+    }
+
+    const nowIso = new Date().toISOString();
+    const nextOwnerStatus = approve ? 'APPROVED' : 'REJECTED';
+    if (!approve) {
+      if (!note?.trim()) {
+        throw new HttpError(400, 'Rejection remarks are required.');
+      }
+      db.prepare(
+        `UPDATE bom_revision_requests
+         SET owner_approval_status = 'REJECTED', owner_approved_by = ?, owner_approved_at = ?,
+             status = 'REJECTED', review_note = ?, reviewed_by_name = ?, reviewed_at = ?
+         WHERE id = ?`
+      ).run(actor.fullName, nowIso, note.trim(), actor.fullName, nowIso, revisionId);
+    } else {
+      db.prepare(
+        `UPDATE bom_revision_requests
+         SET owner_approval_status = 'APPROVED', owner_approved_by = ?, owner_approved_at = ?
+         WHERE id = ?`
+      ).run(actor.fullName, nowIso, revisionId);
+    }
+
+    recordAuditLog(
+      db,
+      actor,
+      'BOM_REVISION',
+      revisionId,
+      `BOM_REVISION_OWNER_${nextOwnerStatus}`,
+      `${reqRow.request_number}${note?.trim() ? `: ${note.trim()}` : ''}`
+    );
+    return { id: revisionId, requestNumber: reqRow.request_number, ownerApprovalStatus: nextOwnerStatus };
   });
 }
 
@@ -1172,6 +1278,9 @@ export function reviewBomRevisionRequest(
           material_id: string;
           suggested_qty_per_unit_scaled: number;
           status: string;
+          owner_approval_status: string;
+          affects_costing_or_tax: number;
+          accountant_verification_status: string;
         }
       | undefined;
 
@@ -1181,17 +1290,85 @@ export function reviewBomRevisionRequest(
     if (reqRow.status !== 'PENDING_ADMIN_REVIEW') {
       throw new HttpError(400, `BOM revision ${reqRow.request_number} is already ${reqRow.status}.`);
     }
+    if (decision === 'APPROVE') {
+      if (reqRow.owner_approval_status !== 'APPROVED') {
+        throw new HttpError(
+          403,
+          `BOM revision ${reqRow.request_number} requires Owner approval before Admin can register the new BOM version.`
+        );
+      }
+      if (
+        reqRow.affects_costing_or_tax === 1 &&
+        reqRow.accountant_verification_status !== 'VERIFIED'
+      ) {
+        throw new HttpError(
+          403,
+          `BOM revision ${reqRow.request_number} requires Accountant costing/tax verification first.`
+        );
+      }
+    }
 
     const nowIso = new Date().toISOString();
     const nextStatus = decision === 'APPROVE' ? 'APPROVED' : 'REJECTED';
-    let newVersion = reqRow.live_bom_version || 'v1.0';
+    const { bomHeader: currentHeader, lines: currentLines } = getProductBomSnapshot(
+      db,
+      reqRow.product_id
+    );
+    let newVersion = currentHeader?.bom_version || reqRow.live_bom_version || 'v1.0';
 
     if (decision === 'APPROVE') {
-      db.prepare(
-        `UPDATE bom_items SET quantity_per_unit_scaled = ? WHERE product_id = ? AND material_id = ?`
-      ).run(reqRow.suggested_qty_per_unit_scaled, reqRow.product_id, reqRow.material_id);
-
       newVersion = bumpBomVersion(newVersion);
+      while (
+        db
+          .prepare(`SELECT 1 FROM boms WHERE product_id = ? AND bom_version = ?`)
+          .get(reqRow.product_id, newVersion)
+      ) {
+        newVersion = bumpBomVersion(newVersion);
+      }
+
+      if (currentHeader) {
+        db.prepare(
+          `UPDATE boms SET approval_status = 'ARCHIVED', updated_at = ? WHERE id = ?`
+        ).run(nowIso, currentHeader.id);
+      }
+
+      const newBomId = uid('bomhdr');
+      db.prepare(
+        `INSERT INTO boms (
+          id, product_id, bom_version, approval_status, quantity_basis,
+          effective_date, notes, approved_by, created_by, created_at, updated_at
+        ) VALUES (?, ?, ?, 'APPROVED', 'PER_UNIT', ?, ?, ?, ?, ?, ?)`
+      ).run(
+        newBomId,
+        reqRow.product_id,
+        newVersion,
+        nowIso.slice(0, 10),
+        `Approved BOM revision ${reqRow.request_number}`,
+        actor.fullName,
+        actor.fullName,
+        nowIso,
+        nowIso
+      );
+
+      const insertItem = db.prepare(
+        `INSERT INTO bom_items (id, bom_id, product_id, material_id, quantity_per_unit_scaled, unit, quantity_basis)
+         VALUES (?, ?, ?, ?, ?, ?, 'PER_UNIT')`
+      );
+      for (const line of currentLines) {
+        const qtyScaled =
+          line.material_id === reqRow.material_id
+            ? reqRow.suggested_qty_per_unit_scaled
+            : line.quantity_per_unit_scaled;
+        insertItem.run(
+          uid('bom'),
+          newBomId,
+          reqRow.product_id,
+          line.material_id,
+          qtyScaled,
+          line.material_unit
+        );
+      }
+
       db.prepare(
         `UPDATE inventory_items SET bom_version = ?, updated_at = ? WHERE id = ?`
       ).run(newVersion, nowIso, reqRow.product_id);
@@ -1310,4 +1487,223 @@ export function updateRunVarianceExplanation(
     `${run.run_number}: ${(explanation ?? '').trim().slice(0, 120)}`
   );
   return { id: runId, varianceExplanation: (explanation ?? '').trim() };
+}
+
+// ---------------------------------------------------------------------------
+// 7. New Material Proposals (Production Supervisor -> Admin Catalogue Review)
+// ---------------------------------------------------------------------------
+
+export function listMaterialProposals(db: DatabaseSync, actor: AuthUser) {
+  requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN', 'PRODUCTION_SUPERVISOR']);
+  const rows = db
+    .prepare(`SELECT * FROM material_proposals ORDER BY created_at DESC`)
+    .all() as Array<{
+    id: string;
+    proposal_number: string;
+    name: string;
+    suggested_sku: string;
+    category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+    unit: string;
+    suggested_reorder_level_scaled: number;
+    reason: string;
+    status: 'PENDING_ADMIN_REVIEW' | 'APPROVED' | 'REJECTED';
+    proposed_by_name: string;
+    reviewed_by_name: string;
+    review_note: string;
+    created_material_id: string | null;
+    created_at: string;
+    reviewed_at: string;
+  }>;
+
+  return rows.map((r) => ({
+    id: r.id,
+    proposalNumber: r.proposal_number,
+    name: r.name,
+    suggestedSku: r.suggested_sku || undefined,
+    category: r.category,
+    unit: r.unit,
+    suggestedReorderLevel: fromScaledQty(r.suggested_reorder_level_scaled),
+    reason: r.reason,
+    status: r.status,
+    proposedByName: r.proposed_by_name,
+    reviewedByName: r.reviewed_by_name || undefined,
+    reviewNote: r.review_note || undefined,
+    createdMaterialId: r.created_material_id || undefined,
+    createdAt: r.created_at,
+    reviewedAt: r.reviewed_at || undefined,
+  }));
+}
+
+export function createMaterialProposal(
+  db: DatabaseSync,
+  actor: AuthUser,
+  input: {
+    name: string;
+    suggestedSku?: string;
+    category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+    unit: string;
+    suggestedReorderLevel?: number;
+    reason: string;
+  }
+) {
+  requireRole(actor, ['PRODUCTION_SUPERVISOR']);
+  const name = (input.name ?? '').trim();
+  const unit = (input.unit ?? '').trim();
+  const reason = (input.reason ?? '').trim();
+  if (!name || !unit || !reason) {
+    throw new HttpError(400, 'Material name, unit of measure, and justification reason are required.');
+  }
+  if (input.category !== 'RAW_MATERIAL' && input.category !== 'PACKAGING_MATERIAL') {
+    throw new HttpError(400, 'Category must be RAW_MATERIAL or PACKAGING_MATERIAL.');
+  }
+  const reorderLevel = input.suggestedReorderLevel ?? 0;
+  if (!Number.isFinite(reorderLevel) || reorderLevel < 0) {
+    throw new HttpError(400, 'Suggested reorder level cannot be negative.');
+  }
+
+  return runInTransaction(db, () => {
+    const id = uid('matp');
+    const proposalNumber = nextSequenceNumber(
+      db,
+      'material_proposals',
+      'proposal_number',
+      'MATP-2026-'
+    );
+    const nowIso = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO material_proposals (
+        id, proposal_number, name, suggested_sku, category, unit,
+        suggested_reorder_level_scaled, reason, status,
+        proposed_by_user_id, proposed_by_name, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_ADMIN_REVIEW', ?, ?, ?)`
+    ).run(
+      id,
+      proposalNumber,
+      name,
+      (input.suggestedSku ?? '').trim(),
+      input.category,
+      unit,
+      toScaledQty(reorderLevel),
+      reason,
+      actor.id,
+      actor.fullName,
+      nowIso
+    );
+
+    recordAuditLog(
+      db,
+      actor,
+      'MATERIAL_PROPOSAL',
+      id,
+      'PROPOSE_MATERIAL',
+      `${proposalNumber}: ${name} (${input.category}, ${unit})`
+    );
+
+    return { id, proposalNumber };
+  });
+}
+
+export function reviewMaterialProposal(
+  db: DatabaseSync,
+  actor: AuthUser,
+  proposalId: string,
+  decision: 'APPROVE' | 'REJECT',
+  input?: { sku?: string; reorderLevel?: number; note?: string }
+) {
+  requireRole(actor, ['ADMIN']);
+
+  return runInTransaction(db, () => {
+    const row = db
+      .prepare(`SELECT * FROM material_proposals WHERE id = ?`)
+      .get(proposalId) as
+      | {
+          id: string;
+          proposal_number: string;
+          name: string;
+          suggested_sku: string;
+          category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+          unit: string;
+          suggested_reorder_level_scaled: number;
+          status: string;
+        }
+      | undefined;
+    if (!row) {
+      throw new HttpError(404, `Material proposal ${proposalId} not found.`);
+    }
+    if (row.status !== 'PENDING_ADMIN_REVIEW') {
+      throw new HttpError(400, `Proposal ${row.proposal_number} is already ${row.status}.`);
+    }
+
+    const nowIso = new Date().toISOString();
+    const nextStatus = decision === 'APPROVE' ? 'APPROVED' : 'REJECTED';
+    let createdMaterialId: string | null = null;
+
+    if (decision === 'APPROVE') {
+      const sku =
+        (input?.sku ?? '').trim() ||
+        row.suggested_sku.trim() ||
+        nextSequenceNumber(
+          db,
+          'inventory_items',
+          'sku',
+          row.category === 'RAW_MATERIAL' ? 'RM-' : 'PKG-'
+        );
+      const dupSku = db
+        .prepare(`SELECT id, name FROM inventory_items WHERE LOWER(TRIM(sku)) = LOWER(TRIM(?))`)
+        .get(sku) as { id: string; name: string } | undefined;
+      if (dupSku) {
+        throw new HttpError(
+          409,
+          `Material SKU '${sku}' already exists for ${dupSku.name}. Provide a unique SKU to approve.`
+        );
+      }
+
+      createdMaterialId = uid(row.category === 'RAW_MATERIAL' ? 'rm' : 'pkg');
+      const reorderScaled =
+        input?.reorderLevel !== undefined && Number.isFinite(input.reorderLevel)
+          ? toScaledQty(Math.max(0, input.reorderLevel))
+          : row.suggested_reorder_level_scaled;
+
+      db.prepare(
+        `INSERT INTO inventory_items (
+          id, sku, name, category, unit, pack_size, selling_price_paise,
+          gst_rate_bps, hsn_code, image_url, reorder_level_scaled, is_active, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, '', 0, 0, '', '', ?, 1, ?, ?)`
+      ).run(createdMaterialId, sku, row.name, row.category, row.unit, reorderScaled, nowIso, nowIso);
+
+      db.prepare(
+        `INSERT INTO stock_balances (item_id, quantity_scaled, updated_at) VALUES (?, 0, ?)`
+      ).run(createdMaterialId, nowIso);
+    }
+
+    db.prepare(
+      `UPDATE material_proposals
+       SET status = ?, reviewed_by_name = ?, review_note = ?, created_material_id = ?, reviewed_at = ?
+       WHERE id = ?`
+    ).run(
+      nextStatus,
+      actor.fullName,
+      input?.note?.trim() || '',
+      createdMaterialId,
+      nowIso,
+      row.id
+    );
+
+    recordAuditLog(
+      db,
+      actor,
+      'MATERIAL_PROPOSAL',
+      row.id,
+      `MATERIAL_PROPOSAL_${nextStatus}`,
+      `${row.proposal_number} (${row.name}): ${nextStatus}`
+    );
+
+    return {
+      id: row.id,
+      proposalNumber: row.proposal_number,
+      status: nextStatus,
+      createdMaterialId: createdMaterialId || undefined,
+    };
+  });
 }

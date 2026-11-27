@@ -142,12 +142,143 @@ export function initializeSchema(db: DatabaseSync): void {
       PRIMARY KEY (supplier_id, item_id)
     );
 
+    CREATE TABLE IF NOT EXISTS boms (
+      id TEXT PRIMARY KEY,
+      product_id TEXT NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+      bom_version TEXT NOT NULL,
+      approval_status TEXT NOT NULL DEFAULT 'APPROVED' CHECK(approval_status IN ('DRAFT', 'APPROVED', 'ARCHIVED')),
+      quantity_basis TEXT NOT NULL DEFAULT 'PER_UNIT',
+      effective_date TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      approved_by TEXT NOT NULL DEFAULT '',
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(product_id, bom_version)
+    );
+
     CREATE TABLE IF NOT EXISTS bom_items (
       id TEXT PRIMARY KEY,
+      bom_id TEXT NOT NULL REFERENCES boms(id) ON DELETE CASCADE,
       product_id TEXT NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
       material_id TEXT NOT NULL REFERENCES inventory_items(id),
       quantity_per_unit_scaled INTEGER NOT NULL CHECK(quantity_per_unit_scaled > 0),
-      UNIQUE(product_id, material_id)
+      unit TEXT NOT NULL DEFAULT '',
+      quantity_basis TEXT NOT NULL DEFAULT 'PER_UNIT',
+      UNIQUE(bom_id, material_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS material_proposals (
+      id TEXT PRIMARY KEY,
+      proposal_number TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      suggested_sku TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL CHECK(category IN ('RAW_MATERIAL', 'PACKAGING_MATERIAL')),
+      unit TEXT NOT NULL,
+      suggested_reorder_level_scaled INTEGER NOT NULL DEFAULT 0 CHECK(suggested_reorder_level_scaled >= 0),
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PENDING_ADMIN_REVIEW' CHECK(status IN ('PENDING_ADMIN_REVIEW', 'APPROVED', 'REJECTED')),
+      proposed_by_user_id TEXT NOT NULL REFERENCES users(id),
+      proposed_by_name TEXT NOT NULL,
+      reviewed_by_name TEXT NOT NULL DEFAULT '',
+      review_note TEXT NOT NULL DEFAULT '',
+      created_material_id TEXT REFERENCES inventory_items(id),
+      created_at TEXT NOT NULL,
+      reviewed_at TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS product_proposals (
+      id TEXT PRIMARY KEY,
+      proposal_number TEXT NOT NULL UNIQUE,
+      product_name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      pack_size TEXT NOT NULL DEFAULT '',
+      unit TEXT NOT NULL DEFAULT 'packets',
+      product_category TEXT NOT NULL DEFAULT 'Snacks & Savouries',
+      status TEXT NOT NULL DEFAULT 'DRAFT' CHECK(status IN (
+        'DRAFT',
+        'PENDING_PRODUCTION_VERIFICATION',
+        'PRODUCTION_VERIFIED',
+        'PENDING_ACCOUNTANT_VERIFICATION',
+        'ACCOUNTANT_VERIFIED',
+        'PENDING_OWNER_APPROVAL',
+        'RETURNED_FOR_CORRECTION',
+        'REJECTED',
+        'APPROVED_PENDING_REGISTRATION',
+        'CATALOGUE_REGISTERED',
+        'ACTIVE'
+      )),
+      initiated_by_user_id TEXT NOT NULL REFERENCES users(id),
+      initiated_by_name TEXT NOT NULL,
+      initiated_by_role TEXT NOT NULL,
+      submitted_at TEXT NOT NULL DEFAULT '',
+      production_verification_status TEXT NOT NULL DEFAULT 'PENDING' CHECK(production_verification_status IN ('PENDING', 'VERIFIED', 'RETURNED')),
+      production_feasibility TEXT NOT NULL DEFAULT '',
+      expected_yield_percent_bps INTEGER NOT NULL DEFAULT 10000 CHECK(expected_yield_percent_bps > 0 AND expected_yield_percent_bps <= 10000),
+      production_instructions TEXT NOT NULL DEFAULT '',
+      production_remarks TEXT NOT NULL DEFAULT '',
+      production_verified_by_user_id TEXT REFERENCES users(id),
+      production_verified_by_name TEXT NOT NULL DEFAULT '',
+      production_verified_at TEXT NOT NULL DEFAULT '',
+      accountant_verification_status TEXT NOT NULL DEFAULT 'PENDING' CHECK(accountant_verification_status IN ('PENDING', 'VERIFIED', 'RETURNED')),
+      hsn_code TEXT NOT NULL DEFAULT '',
+      gst_rate_bps INTEGER NOT NULL DEFAULT 0 CHECK(gst_rate_bps >= 0),
+      tax_classification TEXT NOT NULL DEFAULT '',
+      estimated_cost_paise INTEGER NOT NULL DEFAULT 0 CHECK(estimated_cost_paise >= 0),
+      costing_notes TEXT NOT NULL DEFAULT '',
+      accountant_remarks TEXT NOT NULL DEFAULT '',
+      accountant_verified_by_user_id TEXT REFERENCES users(id),
+      accountant_verified_by_name TEXT NOT NULL DEFAULT '',
+      accountant_verified_at TEXT NOT NULL DEFAULT '',
+      owner_decision TEXT NOT NULL DEFAULT 'PENDING' CHECK(owner_decision IN ('PENDING', 'APPROVED', 'REJECTED', 'RETURNED')),
+      proposed_selling_price_paise INTEGER NOT NULL DEFAULT 0 CHECK(proposed_selling_price_paise >= 0),
+      proposed_reorder_level_scaled INTEGER NOT NULL DEFAULT 0 CHECK(proposed_reorder_level_scaled >= 0),
+      approved_selling_price_paise INTEGER NOT NULL DEFAULT 0 CHECK(approved_selling_price_paise >= 0),
+      approved_reorder_level_scaled INTEGER NOT NULL DEFAULT 0 CHECK(approved_reorder_level_scaled >= 0),
+      owner_remarks TEXT NOT NULL DEFAULT '',
+      approved_by_user_id TEXT REFERENCES users(id),
+      approved_by_name TEXT NOT NULL DEFAULT '',
+      approved_at TEXT NOT NULL DEFAULT '',
+      returned_to_stage TEXT NOT NULL DEFAULT '',
+      returned_reason TEXT NOT NULL DEFAULT '',
+      returned_by_name TEXT NOT NULL DEFAULT '',
+      registered_product_id TEXT REFERENCES inventory_items(id),
+      registered_sku TEXT NOT NULL DEFAULT '',
+      registered_by_user_id TEXT REFERENCES users(id),
+      registered_by_name TEXT NOT NULL DEFAULT '',
+      registered_at TEXT NOT NULL DEFAULT '',
+      activated_at TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS product_proposal_bom_items (
+      id TEXT PRIMARY KEY,
+      proposal_id TEXT NOT NULL REFERENCES product_proposals(id) ON DELETE CASCADE,
+      item_type TEXT NOT NULL CHECK(item_type IN ('EXISTING_MATERIAL', 'NEW_MATERIAL')),
+      material_id TEXT REFERENCES inventory_items(id),
+      material_name TEXT NOT NULL,
+      material_category TEXT NOT NULL CHECK(material_category IN ('RAW_MATERIAL', 'PACKAGING_MATERIAL')),
+      unit TEXT NOT NULL,
+      suggested_reorder_level_scaled INTEGER NOT NULL DEFAULT 0 CHECK(suggested_reorder_level_scaled >= 0),
+      quantity_per_unit_scaled INTEGER NOT NULL CHECK(quantity_per_unit_scaled > 0),
+      notes TEXT NOT NULL DEFAULT '',
+      created_material_id TEXT REFERENCES inventory_items(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS product_proposal_audit_trail (
+      id TEXT PRIMARY KEY,
+      proposal_id TEXT NOT NULL REFERENCES product_proposals(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      user_role TEXT NOT NULL,
+      user_name TEXT NOT NULL,
+      action TEXT NOT NULL,
+      previous_value TEXT NOT NULL DEFAULT '',
+      new_value TEXT NOT NULL DEFAULT '',
+      related_entity_type TEXT NOT NULL DEFAULT 'PRODUCT_PROPOSAL',
+      related_entity_id TEXT NOT NULL DEFAULT '',
+      remarks TEXT NOT NULL DEFAULT '',
+      timestamp TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS orders (
@@ -901,6 +1032,139 @@ export function initializeSchema(db: DatabaseSync): void {
     JOIN orders o ON o.id = d.order_id
     WHERE NOT EXISTS (SELECT 1 FROM dispatch_items di WHERE di.dispatch_id = d.id);
   `);
+
+  // Safe migration for versioned boms + bom_items (bom_id, unit, quantity_basis)
+  const bomColumns = db
+    .prepare(`PRAGMA table_info(bom_items)`)
+    .all() as Array<{ name: string }>;
+  if (!bomColumns.some((c) => c.name === 'bom_id')) {
+    db.exec(`PRAGMA foreign_keys = OFF;`);
+    db.exec(`
+      BEGIN IMMEDIATE;
+      INSERT OR IGNORE INTO boms (
+        id, product_id, bom_version, approval_status, quantity_basis,
+        effective_date, notes, approved_by, created_by, created_at, updated_at
+      )
+      SELECT DISTINCT
+        'bomhdr-' || b.product_id || '-' || REPLACE(COALESCE(NULLIF(p.bom_version, ''), 'v1.0'), '.', '_'),
+        b.product_id,
+        COALESCE(NULLIF(p.bom_version, ''), 'v1.0'),
+        'APPROVED',
+        'PER_UNIT',
+        substr(COALESCE(NULLIF(p.created_at, ''), '2026-11-01T00:00:00.000Z'), 1, 10),
+        'Migrated from legacy predefined BOM',
+        'Production Supervisor',
+        'System Migration',
+        COALESCE(NULLIF(p.created_at, ''), '2026-11-01T00:00:00.000Z'),
+        COALESCE(NULLIF(p.updated_at, ''), '2026-11-01T00:00:00.000Z')
+      FROM bom_items b
+      JOIN inventory_items p ON p.id = b.product_id;
+
+      CREATE TABLE bom_items_migrated (
+        id TEXT PRIMARY KEY,
+        bom_id TEXT NOT NULL REFERENCES boms(id) ON DELETE CASCADE,
+        product_id TEXT NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+        material_id TEXT NOT NULL REFERENCES inventory_items(id),
+        quantity_per_unit_scaled INTEGER NOT NULL CHECK(quantity_per_unit_scaled > 0),
+        unit TEXT NOT NULL DEFAULT '',
+        quantity_basis TEXT NOT NULL DEFAULT 'PER_UNIT',
+        UNIQUE(bom_id, material_id)
+      );
+
+      INSERT INTO bom_items_migrated (id, bom_id, product_id, material_id, quantity_per_unit_scaled, unit, quantity_basis)
+      SELECT
+        b.id,
+        'bomhdr-' || b.product_id || '-' || REPLACE(COALESCE(NULLIF(p.bom_version, ''), 'v1.0'), '.', '_'),
+        b.product_id,
+        b.material_id,
+        b.quantity_per_unit_scaled,
+        COALESCE(m.unit, ''),
+        'PER_UNIT'
+      FROM bom_items b
+      JOIN inventory_items p ON p.id = b.product_id
+      LEFT JOIN inventory_items m ON m.id = b.material_id;
+
+      DROP TABLE bom_items;
+      ALTER TABLE bom_items_migrated RENAME TO bom_items;
+      COMMIT;
+    `);
+    db.exec(`PRAGMA foreign_keys = ON;`);
+  }
+
+  // Safe migration adding bom_id references to production_requests & production_runs
+  const prCols = db
+    .prepare(`PRAGMA table_info(production_requests)`)
+    .all() as Array<{ name: string }>;
+  if (!prCols.some((c) => c.name === 'bom_id')) {
+    db.exec(`ALTER TABLE production_requests ADD COLUMN bom_id TEXT REFERENCES boms(id)`);
+  }
+  const runCols = db
+    .prepare(`PRAGMA table_info(production_runs)`)
+    .all() as Array<{ name: string }>;
+  if (!runCols.some((c) => c.name === 'bom_id')) {
+    db.exec(`ALTER TABLE production_runs ADD COLUMN bom_id TEXT REFERENCES boms(id)`);
+  }
+
+  // Backfill bom_id on existing production requests/runs using active APPROVED BOM
+  db.exec(`
+    UPDATE production_requests
+    SET bom_id = (
+      SELECT b.id FROM boms b
+      WHERE b.product_id = production_requests.product_id AND b.approval_status = 'APPROVED'
+      ORDER BY b.created_at DESC LIMIT 1
+    )
+    WHERE bom_id IS NULL;
+
+    UPDATE production_runs
+    SET bom_id = COALESCE(
+      (SELECT pr.bom_id FROM production_requests pr WHERE pr.id = production_runs.production_request_id),
+      (SELECT b.id FROM boms b WHERE b.product_id = production_runs.product_id AND b.bom_version = production_runs.bom_version LIMIT 1),
+      (SELECT b.id FROM boms b WHERE b.product_id = production_runs.product_id AND b.approval_status = 'APPROVED' ORDER BY b.created_at DESC LIMIT 1)
+    )
+    WHERE bom_id IS NULL;
+  `);
+
+  // Safe migrations for verified proposal governance references
+  const itemColsAfter = db
+    .prepare(`PRAGMA table_info(inventory_items)`)
+    .all() as Array<{ name: string }>;
+  if (!itemColsAfter.some((c) => c.name === 'source_proposal_id')) {
+    db.exec(
+      `ALTER TABLE inventory_items ADD COLUMN source_proposal_id TEXT REFERENCES product_proposals(id)`
+    );
+  }
+  const bomHdrCols = db
+    .prepare(`PRAGMA table_info(boms)`)
+    .all() as Array<{ name: string }>;
+  if (!bomHdrCols.some((c) => c.name === 'source_proposal_id')) {
+    db.exec(
+      `ALTER TABLE boms ADD COLUMN source_proposal_id TEXT REFERENCES product_proposals(id)`
+    );
+  }
+
+  const bomRevCols = db
+    .prepare(`PRAGMA table_info(bom_revision_requests)`)
+    .all() as Array<{ name: string }>;
+  if (!bomRevCols.some((c) => c.name === 'affects_costing_or_tax')) {
+    db.exec(
+      `ALTER TABLE bom_revision_requests ADD COLUMN affects_costing_or_tax INTEGER NOT NULL DEFAULT 0`
+    );
+    db.exec(
+      `ALTER TABLE bom_revision_requests ADD COLUMN accountant_verification_status TEXT NOT NULL DEFAULT 'NOT_REQUIRED'`
+    );
+    db.exec(
+      `ALTER TABLE bom_revision_requests ADD COLUMN accountant_verified_by TEXT NOT NULL DEFAULT ''`
+    );
+    db.exec(
+      `ALTER TABLE bom_revision_requests ADD COLUMN owner_approval_status TEXT NOT NULL DEFAULT 'PENDING_OWNER_APPROVAL'`
+    );
+    db.exec(
+      `ALTER TABLE bom_revision_requests ADD COLUMN owner_approved_by TEXT NOT NULL DEFAULT ''`
+    );
+    db.exec(
+      `ALTER TABLE bom_revision_requests ADD COLUMN owner_approved_at TEXT NOT NULL DEFAULT ''`
+    );
+  }
 }
 
 export function runInTransaction<T>(db: DatabaseSync, fn: () => T): T {

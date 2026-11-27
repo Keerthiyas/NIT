@@ -19,14 +19,16 @@ export type SupervisorNavSection =
   | 'requests'
   | 'inventory'
   | 'execution'
-  | 'history';
+  | 'history'
+  | 'proposals';
 
 export type AccountantNavSection =
   | 'dashboard'
   | 'invoices'
   | 'payments'
   | 'receivables'
-  | 'reports';
+  | 'reports'
+  | 'product-verifications';
 
 export type OwnerNavSection =
   | 'dashboard'
@@ -142,12 +144,20 @@ export interface BomRequirementLine {
   availableStock: number;
   shortfallQuantity: number;
   isSufficient: boolean;
+  isMaterialActive?: boolean;
 }
 
 export type RawMaterialAvailability =
   | 'SUFFICIENT'
   | 'INSUFFICIENT'
-  | 'NOT_APPLICABLE';
+  | 'NOT_APPLICABLE'
+  | 'MISSING_BOM';
+
+export type OrderReviewOverallStatus =
+  | 'STOCK_AVAILABLE'
+  | 'READY_FOR_PRODUCTION'
+  | 'MATERIAL_SHORTAGE'
+  | 'MISSING_BOM';
 
 export interface OrderItemShortageAnalysis {
   orderItemId: string;
@@ -161,6 +171,9 @@ export interface OrderItemShortageAnalysis {
   availableFinishedStock: number;
   shortageQuantity: number;
   productionRequired: boolean;
+  bomId?: string;
+  bomVersion?: string;
+  bomStatus?: 'APPROVED' | 'UNAPPROVED_BOM' | 'MISSING_BOM';
   rawMaterialAvailability: RawMaterialAvailability;
   bomBreakdown: BomRequirementLine[];
   materialsRequiringPurchase: BomRequirementLine[];
@@ -177,6 +190,12 @@ export interface OrderShortageAnalysis {
   shortageQuantity: number;
   productionRequired: boolean;
   rawMaterialAvailability: RawMaterialAvailability;
+  overallReviewStatus?: OrderReviewOverallStatus;
+  missingBomProducts?: Array<{
+    productId: string;
+    productName: string;
+    bomStatus: string;
+  }>;
   bomBreakdown: BomRequirementLine[];
   materialsRequiringPurchase: BomRequirementLine[];
   itemAnalyses?: OrderItemShortageAnalysis[];
@@ -446,6 +465,12 @@ export interface BomRevisionRequest {
   runNumber?: string;
   reason: string;
   status: 'PENDING_ADMIN_REVIEW' | 'APPROVED' | 'REJECTED';
+  affectsCostingOrTax?: boolean;
+  accountantVerificationStatus?: string;
+  accountantVerifiedBy?: string;
+  ownerApprovalStatus?: string;
+  ownerApprovedBy?: string;
+  ownerApprovedAt?: string;
   requestedByName: string;
   reviewedByName?: string;
   reviewNote?: string;
@@ -849,6 +874,10 @@ export interface FinancialReportsData {
 // --- Management Master Data ---
 
 export interface CatalogueProduct extends InventoryItem {
+  bomId?: string;
+  bomApprovalStatus?: 'DRAFT' | 'APPROVED' | 'ARCHIVED';
+  bomEffectiveDate?: string;
+  bomQuantityBasis?: string;
   bomItems: Array<{
     id: string;
     materialId: string;
@@ -857,7 +886,51 @@ export interface CatalogueProduct extends InventoryItem {
     unit: string;
     category: InventoryCategory;
     quantityPerUnit: number;
+    quantityBasis?: string;
+    isMaterialActive?: boolean;
   }>;
+}
+
+export interface ProductBomVersion {
+  id: string;
+  productId: string;
+  bomVersion: string;
+  approvalStatus: 'DRAFT' | 'APPROVED' | 'ARCHIVED';
+  quantityBasis: string;
+  effectiveDate: string;
+  notes?: string;
+  approvedBy?: string;
+  createdBy?: string;
+  createdAt: string;
+  items: Array<{
+    id: string;
+    materialId: string;
+    materialName: string;
+    materialSku: string;
+    unit: string;
+    category: InventoryCategory;
+    quantityPerUnit: number;
+    quantityBasis?: string;
+    isMaterialActive?: boolean;
+  }>;
+}
+
+export interface MaterialProposal {
+  id: string;
+  proposalNumber: string;
+  name: string;
+  suggestedSku?: string;
+  category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+  unit: string;
+  suggestedReorderLevel: number;
+  reason: string;
+  status: 'PENDING_ADMIN_REVIEW' | 'APPROVED' | 'REJECTED';
+  proposedByName: string;
+  reviewedByName?: string;
+  reviewNote?: string;
+  createdMaterialId?: string;
+  createdAt: string;
+  reviewedAt?: string;
 }
 
 export interface Customer {
@@ -1180,4 +1253,99 @@ export interface OwnerReportsData {
       collectedAmount: number;
     }>;
   };
+}
+
+// --- Verified Product Proposal, Approval & Governed Catalogue Registration ---
+
+export type ProductProposalStatus =
+  | 'DRAFT'
+  | 'PENDING_PRODUCTION_VERIFICATION'
+  | 'PRODUCTION_VERIFIED'
+  | 'PENDING_ACCOUNTANT_VERIFICATION'
+  | 'ACCOUNTANT_VERIFIED'
+  | 'PENDING_OWNER_APPROVAL'
+  | 'RETURNED_FOR_CORRECTION'
+  | 'REJECTED'
+  | 'APPROVED_PENDING_REGISTRATION'
+  | 'CATALOGUE_REGISTERED'
+  | 'ACTIVE';
+
+export interface ProductProposalBomItem {
+  id: string;
+  itemType: 'EXISTING_MATERIAL' | 'NEW_MATERIAL';
+  materialId?: string;
+  materialSku?: string;
+  materialName: string;
+  materialCategory: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+  unit: string;
+  suggestedReorderLevel: number;
+  quantityPerUnit: number;
+  notes?: string;
+  createdMaterialId?: string;
+  isExistingMaterialActive: boolean;
+}
+
+export interface ProductProposalAuditEntry {
+  id: string;
+  userId: string;
+  userRole: string;
+  userName: string;
+  action: string;
+  previousValue?: string;
+  newValue?: string;
+  relatedEntityType: string;
+  relatedEntityId: string;
+  remarks?: string;
+  timestamp: string;
+}
+
+export interface ProductProposal {
+  id: string;
+  proposalNumber: string;
+  productName: string;
+  description: string;
+  packSize: string;
+  unit: string;
+  productCategory: string;
+  status: ProductProposalStatus;
+  initiatedByUserId: string;
+  initiatedByName: string;
+  initiatedByRole: UserRole;
+  submittedAt?: string;
+  productionVerificationStatus: 'PENDING' | 'VERIFIED' | 'RETURNED';
+  productionFeasibility?: 'FEASIBLE' | 'REQUIRES_EQUIPMENT' | 'NOT_FEASIBLE';
+  expectedYieldPercent: number;
+  productionInstructions?: string;
+  productionRemarks?: string;
+  productionVerifiedByName?: string;
+  productionVerifiedAt?: string;
+  accountantVerificationStatus: 'PENDING' | 'VERIFIED' | 'RETURNED';
+  hsnCode?: string;
+  gstRate: number;
+  taxClassification?: string;
+  estimatedCost: number;
+  costingNotes?: string;
+  accountantRemarks?: string;
+  accountantVerifiedByName?: string;
+  accountantVerifiedAt?: string;
+  ownerDecision: 'PENDING' | 'APPROVED' | 'REJECTED' | 'RETURNED';
+  proposedSellingPrice: number;
+  proposedReorderLevel: number;
+  approvedSellingPrice: number;
+  approvedReorderLevel: number;
+  ownerRemarks?: string;
+  approvedByName?: string;
+  approvedAt?: string;
+  returnedToStage?: string;
+  returnedReason?: string;
+  returnedByName?: string;
+  registeredProductId?: string;
+  registeredSku?: string;
+  registeredByName?: string;
+  registeredAt?: string;
+  activatedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  bomItems: ProductProposalBomItem[];
+  auditTrail: ProductProposalAuditEntry[];
 }

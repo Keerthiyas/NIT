@@ -210,22 +210,43 @@ describe('Order-to-Audit Backend RBAC, Inventory Ledger, Production & Billing Wo
   });
 
   it('enforces dispatch-before-invoice, intra/inter-state GST, partial payments, and zero-stock product creation', async () => {
-    // 1. Adding a product to catalogue initializes stock at 0
-    const prodRes = await callApi(handler, 'POST', '/api/management/products', adminToken, {
-      sku: 'NITT-THT-200',
-      name: 'Thattai 200 g',
+    // 1. Adding an Owner-approved product to catalogue initializes stock at 0
+    const prop1 = await callApi(handler, 'POST', '/api/product-proposals', ownerToken, {
+      productName: 'Thattai 200 g',
       packSize: '200 g',
-      sellingPrice: 40,
-      gstRate: 5,
-      hsnCode: '21069099',
       unit: 'packets',
-      reorderLevel: 30,
-      bomItems: [{ materialId: 'rm-rice-flour', quantityPerUnit: 0.1 }],
+      proposedSellingPrice: 40,
+      proposedReorderLevel: 30,
     });
+    await callApi(handler, 'POST', `/api/product-proposals/${String(prop1.data.id)}/production-verify`, supervisorToken, {
+      productionFeasibility: 'FEASIBLE',
+      bomItems: [{ itemType: 'EXISTING_MATERIAL', materialId: 'rm-rice-flour', quantityPerUnit: 0.1 }],
+      verify: true,
+    });
+    await callApi(handler, 'POST', `/api/product-proposals/${String(prop1.data.id)}/accountant-verify`, accountantToken, {
+      decision: 'VERIFY',
+      hsnCode: '21069099',
+      gstRate: 5,
+      taxClassification: 'GST 5% Food',
+      estimatedCost: 22,
+    });
+    await callApi(handler, 'POST', `/api/product-proposals/${String(prop1.data.id)}/owner-decision`, ownerToken, {
+      decision: 'APPROVE',
+      sellingPrice: 40,
+      reorderLevel: 30,
+    });
+    const prodRes = await callApi(
+      handler,
+      'POST',
+      `/api/product-proposals/${String(prop1.data.id)}/register-product`,
+      adminToken,
+      { sku: 'NITT-THT-200', activateImmediately: true }
+    );
     expect(prodRes.status).toBe(201);
+    const createdProdId = String(prodRes.data.registeredProductId);
     const items = (await callApi(handler, 'GET', '/api/inventory/items', adminToken))
       .data as unknown as Array<{ id: string; availableStock: number }>;
-    expect(items.find((i) => i.id === prodRes.data.id)?.availableStock).toBe(0);
+    expect(items.find((i) => i.id === createdProdId)?.availableStock).toBe(0);
 
     // 2. Dispatch ORD-2026-0140 (Faculty Club Store, TN, 60 Masala Peanuts @ ₹35, 12% GST)
     const dispRes = await callApi(handler, 'POST', '/api/dispatches', adminToken, {
@@ -338,20 +359,39 @@ describe('Order-to-Audit Backend RBAC, Inventory Ledger, Production & Billing Wo
     const imgUrl1 = String(up1.data.imageUrl);
     expect(imgUrl1).toMatch(/^\/api\/uploads\/products\/prod-[a-f0-9-]+\.png$/);
 
-    const createRes = await callApi(handler, 'POST', '/api/management/products', adminToken, {
-      sku: 'NITT-THP-200',
-      name: 'Thattai 200 g',
+    const propImg = await callApi(handler, 'POST', '/api/product-proposals', ownerToken, {
+      productName: 'Thattai 200 g',
       packSize: '200 g',
-      sellingPrice: 42,
-      gstRate: 5,
-      hsnCode: '21069099',
-      imageUrl: imgUrl1,
       unit: 'packets',
-      reorderLevel: 30,
-      bomItems: [{ materialId: 'rm-rice-flour', quantityPerUnit: 0.1 }],
+      proposedSellingPrice: 42,
+      proposedReorderLevel: 30,
     });
+    await callApi(handler, 'POST', `/api/product-proposals/${String(propImg.data.id)}/production-verify`, supervisorToken, {
+      productionFeasibility: 'FEASIBLE',
+      bomItems: [{ itemType: 'EXISTING_MATERIAL', materialId: 'rm-rice-flour', quantityPerUnit: 0.1 }],
+      verify: true,
+    });
+    await callApi(handler, 'POST', `/api/product-proposals/${String(propImg.data.id)}/accountant-verify`, accountantToken, {
+      decision: 'VERIFY',
+      hsnCode: '21069099',
+      gstRate: 5,
+      taxClassification: 'GST 5% Food',
+      estimatedCost: 22,
+    });
+    await callApi(handler, 'POST', `/api/product-proposals/${String(propImg.data.id)}/owner-decision`, ownerToken, {
+      decision: 'APPROVE',
+      sellingPrice: 42,
+      reorderLevel: 30,
+    });
+    const createRes = await callApi(
+      handler,
+      'POST',
+      `/api/product-proposals/${String(propImg.data.id)}/register-product`,
+      adminToken,
+      { sku: 'NITT-THP-200', imageUrl: imgUrl1, activateImmediately: true }
+    );
     expect(createRes.status).toBe(201);
-    const createdId = String(createRes.data.id);
+    const createdId = String(createRes.data.registeredProductId);
 
     // Remove image cleanly on update
     const updRes = await callApi(

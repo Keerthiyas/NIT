@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertCircle, History, Search } from 'lucide-react';
+import { AlertCircle, History, Plus, Search } from 'lucide-react';
 import { orderAuditService } from '../../services/orderAuditService';
 import type {
   InventoryCategory,
@@ -56,6 +56,14 @@ export function SupervisorInventoryView({
     physicalQuantity: number;
     reason: string;
   } | null>(null);
+  const [proposalModal, setProposalModal] = useState<{
+    name: string;
+    suggestedSku: string;
+    category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+    unit: string;
+    suggestedReorderLevel: string;
+    reason: string;
+  } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
@@ -77,6 +85,35 @@ export function SupervisorInventoryView({
     () => (historyItem ? movements.filter((m) => m.itemId === historyItem.id) : []),
     [historyItem, movements]
   );
+
+  const handleProposeMaterial = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!proposalModal) return;
+    setSubmitting(true);
+    setFeedback(null);
+    try {
+      const res = await orderAuditService.createMaterialProposal({
+        name: proposalModal.name,
+        suggestedSku: proposalModal.suggestedSku || undefined,
+        category: proposalModal.category,
+        unit: proposalModal.unit,
+        suggestedReorderLevel: Number(proposalModal.suggestedReorderLevel || 0),
+        reason: proposalModal.reason,
+      });
+      setProposalModal(null);
+      setFeedback({
+        type: 'ok',
+        text: `Material proposal ${res.proposalNumber} submitted for Admin Material Catalogue review.`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Failed to submit material proposal.',
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const handleReportDiscrepancy = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -159,6 +196,24 @@ export function SupervisorInventoryView({
             />
             Low Stock Only
           </label>
+
+          <button
+            type="button"
+            onClick={() =>
+              setProposalModal({
+                name: '',
+                suggestedSku: '',
+                category: 'RAW_MATERIAL',
+                unit: 'kg',
+                suggestedReorderLevel: '20',
+                reason: '',
+              })
+            }
+            className="inline-flex items-center gap-1 rounded-md bg-blue-950 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-900 cursor-pointer"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Propose New Material
+          </button>
         </div>
       </div>
 
@@ -475,6 +530,134 @@ export function SupervisorInventoryView({
                 className="rounded bg-blue-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-800 disabled:opacity-50"
               >
                 Submit Report
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Modal: Propose New Material to Admin */}
+      {proposalModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+          <form
+            onSubmit={(e) => void handleProposeMaterial(e)}
+            className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-5 shadow-xl space-y-4"
+          >
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">
+                Propose New Raw / Packaging Material
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Submits a request for Admin to register this material in the Material Catalogue.
+              </p>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">Material Name</label>
+                <input
+                  required
+                  value={proposalModal.name}
+                  onChange={(e) =>
+                    setProposalModal({ ...proposalModal, name: e.target.value })
+                  }
+                  placeholder="e.g., Cardamom Powder"
+                  className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">Category</label>
+                  <select
+                    value={proposalModal.category}
+                    onChange={(e) =>
+                      setProposalModal({
+                        ...proposalModal,
+                        category: e.target.value as 'RAW_MATERIAL' | 'PACKAGING_MATERIAL',
+                      })
+                    }
+                    className="w-full rounded border border-slate-300 bg-white px-2.5 py-1.5 text-sm"
+                  >
+                    <option value="RAW_MATERIAL">Raw Material</option>
+                    <option value="PACKAGING_MATERIAL">Packaging Material</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">Unit</label>
+                  <input
+                    required
+                    value={proposalModal.unit}
+                    onChange={(e) =>
+                      setProposalModal({ ...proposalModal, unit: e.target.value })
+                    }
+                    placeholder="kg"
+                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">
+                    Suggested SKU (optional)
+                  </label>
+                  <input
+                    value={proposalModal.suggestedSku}
+                    onChange={(e) =>
+                      setProposalModal({ ...proposalModal, suggestedSku: e.target.value })
+                    }
+                    placeholder="RM-201"
+                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">
+                    Suggested Reorder Level
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={proposalModal.suggestedReorderLevel}
+                    onChange={(e) =>
+                      setProposalModal({
+                        ...proposalModal,
+                        suggestedReorderLevel: e.target.value,
+                      })
+                    }
+                    className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">
+                  Production Justification
+                </label>
+                <textarea
+                  rows={2}
+                  required
+                  value={proposalModal.reason}
+                  onChange={(e) =>
+                    setProposalModal({ ...proposalModal, reason: e.target.value })
+                  }
+                  placeholder="Required for new festive snack recipe..."
+                  className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setProposalModal(null)}
+                className="rounded border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={submitting}
+                className="rounded bg-blue-950 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-900 disabled:opacity-50"
+              >
+                Submit Proposal
               </button>
             </div>
           </form>

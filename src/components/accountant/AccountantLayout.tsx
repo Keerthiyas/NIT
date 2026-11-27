@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import {
   BarChart3,
+  ClipboardCheck,
   CreditCard,
   FileText,
   LayoutDashboard,
@@ -23,6 +24,7 @@ const ACCOUNTANT_NAV_ITEMS: NavItem[] = [
   { id: 'payments', label: 'Payments', icon: CreditCard },
   { id: 'receivables', label: 'Receivables', icon: Users },
   { id: 'reports', label: 'Reports', icon: BarChart3 },
+  { id: 'product-verifications', label: 'Product Tax & Costing', icon: ClipboardCheck },
 ];
 
 interface AccountantLayoutProps {

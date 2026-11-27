@@ -17,6 +17,7 @@ import { SupervisorExecutionView } from '../supervisor/SupervisorExecutionView';
 import { SupervisorHistoryView } from '../supervisor/SupervisorHistoryView';
 import { SupervisorInventoryView } from '../supervisor/SupervisorInventoryView';
 import { SupervisorLayout } from '../supervisor/SupervisorLayout';
+import { SupervisorProposalsView } from '../supervisor/SupervisorProposalsView';
 import { SupervisorRequestsView } from '../supervisor/SupervisorRequestsView';
 
 interface SupervisorPortalViewProps {
@@ -211,6 +212,13 @@ export function SupervisorPortalView({ user, onLogout }: SupervisorPortalViewPro
 
           {activeSection === 'history' && (
             <SupervisorHistoryView runs={runs} onRefresh={loadData} />
+          )}
+
+          {activeSection === 'proposals' && (
+            <SupervisorProposalsView
+              inventoryItems={inventoryItems}
+              onRefresh={loadData}
+            />
           )}
         </>
       )}

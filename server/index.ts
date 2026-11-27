@@ -21,6 +21,7 @@ import {
   createSalesmanCustomer,
   createSalesmanOrder,
   createUserByOwner,
+  deleteMaterial,
   evaluateOrderAvailability,
   getAdminDashboardSummary,
   getSalesmanDashboard,
@@ -30,7 +31,9 @@ import {
   listInventoryItems,
   listInvoicesAndPayments,
   listMaterialShortageQueries,
+  listMaterialsCatalogue,
   listOrders,
+  listProductBomHistory,
   listProductionRequests,
   listProductionRuns,
   listProductsWithBom,
@@ -48,11 +51,13 @@ import {
   recordPaymentByAccountant,
   resetUserAccessByOwner,
   setCustomerActiveStatus,
+  setMaterialActiveStatus,
   setProductActiveStatus,
   submitOrderDecision,
   updateProductionRequestStatusBySupervisor,
   updateUserByOwner,
   upsertCustomer,
+  upsertMaterial,
   upsertProductAndBom,
   upsertSupplier,
 } from './services.ts';
@@ -75,21 +80,37 @@ import {
   reversePaymentByAccountant,
 } from './accountantServices.ts';
 import {
+  approveBomRevisionByOwner,
   approvePurchaseOrderByOwner,
   checkProductionRequestAvailability,
   createBomRevisionRequest,
+  createMaterialProposal,
   createMaterialPurchaseRequirement,
   createStockDiscrepancyReport,
   getProductionRunDraft,
   getSupervisorDashboard,
   listBomRevisionRequests,
+  listMaterialProposals,
   listMaterialPurchaseRequirements,
   listStockDiscrepancyReports,
   reviewBomRevisionRequest,
+  reviewMaterialProposal,
   reviewStockDiscrepancyReport,
   saveProductionRunDraft,
   updateRunVarianceExplanation,
+  verifyBomRevisionCostingByAccountant,
 } from './supervisorServices.ts';
+import {
+  createProductProposal,
+  getProductProposalDetail,
+  listProductProposals,
+  raiseAdminCorrectionRequest,
+  registerMissingMaterialFromProposal,
+  registerProductFromApprovedProposal,
+  saveOrVerifyProductionTechnicalDetails,
+  submitAccountantVerification,
+  submitOwnerProductDecision,
+} from './productProposalServices.ts';
 
 async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -338,7 +359,12 @@ export function createApiHandler(db: DatabaseSync) {
       }
 
       if (method === 'GET' && pathname === '/api/bom-revisions') {
-        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN', 'PRODUCTION_SUPERVISOR']);
+        const authed = requireRole(actor, [
+          'OWNER_SUPER_ADMIN',
+          'ADMIN',
+          'PRODUCTION_SUPERVISOR',
+          'ACCOUNTANT',
+        ]);
         return sendJson(res, 200, listBomRevisionRequests(db, authed));
       }
 
@@ -352,6 +378,40 @@ export function createApiHandler(db: DatabaseSync) {
             db,
             authed,
             body as Parameters<typeof createBomRevisionRequest>[2]
+          )
+        );
+      }
+
+      const bomAccMatch = /^\/api\/bom-revisions\/([^/]+)\/accountant-verify$/.exec(pathname);
+      if (method === 'POST' && bomAccMatch) {
+        const authed = requireRole(actor, ['ACCOUNTANT']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          verifyBomRevisionCostingByAccountant(
+            db,
+            authed,
+            decodeURIComponent(bomAccMatch[1]),
+            Boolean(body.approve ?? true),
+            body.note as string | undefined
+          )
+        );
+      }
+
+      const bomOwnerMatch = /^\/api\/bom-revisions\/([^/]+)\/owner-approve$/.exec(pathname);
+      if (method === 'POST' && bomOwnerMatch) {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          approveBomRevisionByOwner(
+            db,
+            authed,
+            decodeURIComponent(bomOwnerMatch[1]),
+            Boolean(body.approve),
+            body.note as string | undefined
           )
         );
       }
@@ -678,6 +738,94 @@ export function createApiHandler(db: DatabaseSync) {
         return sendJson(res, 200, result);
       }
 
+      const prodBomsMatch = /^\/api\/management\/products\/([^/]+)\/boms$/.exec(pathname);
+      if (method === 'GET' && prodBomsMatch) {
+        requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN', 'PRODUCTION_SUPERVISOR']);
+        return sendJson(
+          res,
+          200,
+          listProductBomHistory(db, decodeURIComponent(prodBomsMatch[1]))
+        );
+      }
+
+      // --- Management: Separate Material Catalogue (Raw & Packaging Materials) ---
+      if (method === 'GET' && pathname === '/api/management/materials') {
+        requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN', 'PRODUCTION_SUPERVISOR']);
+        return sendJson(res, 200, listMaterialsCatalogue(db));
+      }
+
+      if (method === 'POST' && pathname === '/api/management/materials') {
+        const authed = requireRole(actor, ['ADMIN']);
+        const body = await readJsonBody(req);
+        const result = upsertMaterial(
+          db,
+          authed,
+          body as Parameters<typeof upsertMaterial>[2]
+        );
+        return sendJson(res, 201, result);
+      }
+
+      const matMatch = /^\/api\/management\/materials\/([^/]+)$/.exec(pathname);
+      if (method === 'PUT' && matMatch) {
+        const authed = requireRole(actor, ['ADMIN']);
+        const body = await readJsonBody(req);
+        const result = upsertMaterial(db, authed, {
+          ...(body as Parameters<typeof upsertMaterial>[2]),
+          id: decodeURIComponent(matMatch[1]),
+        });
+        return sendJson(res, 200, result);
+      }
+
+      if (method === 'DELETE' && matMatch) {
+        const authed = requireRole(actor, ['ADMIN']);
+        const result = deleteMaterial(db, authed, decodeURIComponent(matMatch[1]));
+        return sendJson(res, 200, result);
+      }
+
+      const matStatusMatch = /^\/api\/management\/materials\/([^/]+)\/status$/.exec(pathname);
+      if (method === 'PATCH' && matStatusMatch) {
+        const authed = requireRole(actor, ['ADMIN']);
+        const body = await readJsonBody(req);
+        const result = setMaterialActiveStatus(
+          db,
+          authed,
+          decodeURIComponent(matStatusMatch[1]),
+          Boolean(body.isActive)
+        );
+        return sendJson(res, 200, result);
+      }
+
+      // --- Material Proposals (Production Supervisor proposes -> Admin reviews) ---
+      if (method === 'GET' && pathname === '/api/material-proposals') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN', 'PRODUCTION_SUPERVISOR']);
+        return sendJson(res, 200, listMaterialProposals(db, authed));
+      }
+
+      if (method === 'POST' && pathname === '/api/material-proposals') {
+        const authed = requireRole(actor, ['PRODUCTION_SUPERVISOR']);
+        const body = await readJsonBody(req);
+        const result = createMaterialProposal(
+          db,
+          authed,
+          body as Parameters<typeof createMaterialProposal>[2]
+        );
+        return sendJson(res, 201, result);
+      }
+
+      const matPropReviewMatch = /^\/api\/material-proposals\/([^/]+)\/review$/.exec(pathname);
+      if (method === 'POST' && matPropReviewMatch) {
+        const authed = requireRole(actor, ['ADMIN']);
+        const body = await readJsonBody(req);
+        const result = reviewMaterialProposal(
+          db,
+          authed,
+          decodeURIComponent(matPropReviewMatch[1]),
+          body.decision as 'APPROVE' | 'REJECT',
+          body as { sku?: string; reorderLevel?: number; note?: string }
+        );
+        return sendJson(res, 200, result);
+      }
+
       // --- Management: Customers ---
       if (method === 'GET' && pathname === '/api/management/customers') {
         requireRole(actor, ['OWNER_SUPER_ADMIN', 'ADMIN']);
@@ -862,6 +1010,153 @@ export function createApiHandler(db: DatabaseSync) {
             category: url.searchParams.get('category') || undefined,
             status: url.searchParams.get('status') || undefined,
           })
+        );
+      }
+
+      // --- Verified Product Proposal, Verification, Owner Approval & Governed Registration ---
+      if (method === 'GET' && pathname === '/api/product-proposals') {
+        const authed = requireRole(actor, [
+          'OWNER_SUPER_ADMIN',
+          'ADMIN',
+          'PRODUCTION_SUPERVISOR',
+          'ACCOUNTANT',
+        ]);
+        return sendJson(res, 200, listProductProposals(db, authed));
+      }
+
+      if (method === 'POST' && pathname === '/api/product-proposals') {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN', 'PRODUCTION_SUPERVISOR']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          201,
+          createProductProposal(
+            db,
+            authed,
+            body as Parameters<typeof createProductProposal>[2]
+          )
+        );
+      }
+
+      const propDetailMatch = /^\/api\/product-proposals\/([^/]+)$/.exec(pathname);
+      if (method === 'GET' && propDetailMatch) {
+        const authed = requireRole(actor, [
+          'OWNER_SUPER_ADMIN',
+          'ADMIN',
+          'PRODUCTION_SUPERVISOR',
+          'ACCOUNTANT',
+        ]);
+        return sendJson(
+          res,
+          200,
+          getProductProposalDetail(db, authed, decodeURIComponent(propDetailMatch[1]))
+        );
+      }
+
+      const propProdVerifyMatch = /^\/api\/product-proposals\/([^/]+)\/production-verify$/.exec(
+        pathname
+      );
+      if (method === 'POST' && propProdVerifyMatch) {
+        const authed = requireRole(actor, ['PRODUCTION_SUPERVISOR']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          saveOrVerifyProductionTechnicalDetails(
+            db,
+            authed,
+            decodeURIComponent(propProdVerifyMatch[1]),
+            body as Parameters<typeof saveOrVerifyProductionTechnicalDetails>[3]
+          )
+        );
+      }
+
+      const propAccVerifyMatch = /^\/api\/product-proposals\/([^/]+)\/accountant-verify$/.exec(
+        pathname
+      );
+      if (method === 'POST' && propAccVerifyMatch) {
+        const authed = requireRole(actor, ['ACCOUNTANT']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          submitAccountantVerification(
+            db,
+            authed,
+            decodeURIComponent(propAccVerifyMatch[1]),
+            body as Parameters<typeof submitAccountantVerification>[3]
+          )
+        );
+      }
+
+      const propOwnerMatch = /^\/api\/product-proposals\/([^/]+)\/owner-decision$/.exec(pathname);
+      if (method === 'POST' && propOwnerMatch) {
+        const authed = requireRole(actor, ['OWNER_SUPER_ADMIN']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          submitOwnerProductDecision(
+            db,
+            authed,
+            decodeURIComponent(propOwnerMatch[1]),
+            body as Parameters<typeof submitOwnerProductDecision>[3]
+          )
+        );
+      }
+
+      const propRegMatMatch = /^\/api\/product-proposals\/([^/]+)\/register-material$/.exec(
+        pathname
+      );
+      if (method === 'POST' && propRegMatMatch) {
+        const authed = requireRole(actor, ['ADMIN']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          registerMissingMaterialFromProposal(
+            db,
+            authed,
+            decodeURIComponent(propRegMatMatch[1]),
+            String(body.bomLineId || ''),
+            { sku: String(body.sku || ''), isActive: body.isActive as boolean | undefined }
+          )
+        );
+      }
+
+      const propRegProdMatch = /^\/api\/product-proposals\/([^/]+)\/register-product$/.exec(
+        pathname
+      );
+      if (method === 'POST' && propRegProdMatch) {
+        const authed = requireRole(actor, ['ADMIN']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          201,
+          registerProductFromApprovedProposal(
+            db,
+            authed,
+            decodeURIComponent(propRegProdMatch[1]),
+            body as Parameters<typeof registerProductFromApprovedProposal>[3]
+          )
+        );
+      }
+
+      const propAdminCorrMatch = /^\/api\/product-proposals\/([^/]+)\/admin-correction$/.exec(
+        pathname
+      );
+      if (method === 'POST' && propAdminCorrMatch) {
+        const authed = requireRole(actor, ['ADMIN']);
+        const body = await readJsonBody(req);
+        return sendJson(
+          res,
+          200,
+          raiseAdminCorrectionRequest(
+            db,
+            authed,
+            decodeURIComponent(propAdminCorrMatch[1]),
+            body as Parameters<typeof raiseAdminCorrectionRequest>[3]
+          )
         );
       }
 

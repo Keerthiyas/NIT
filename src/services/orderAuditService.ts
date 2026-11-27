@@ -12,6 +12,7 @@ import type {
   FinancialReportsData,
   InventoryItem,
   ManagedUser,
+  MaterialProposal,
   MaterialPurchaseRequirement,
   MaterialShortageQuery,
   Order,
@@ -24,6 +25,8 @@ import type {
   OwnerInventoryOverviewData,
   OwnerReportsData,
   Product,
+  ProductBomVersion,
+  ProductProposal,
   ProductionRequest,
   ProductionRun,
   ProductionRunDraftPayload,
@@ -580,6 +583,12 @@ export const orderAuditService = {
     return fetchJson<CatalogueProduct[]>('/api/management/products');
   },
 
+  async listProductBomHistory(productId: string): Promise<ProductBomVersion[]> {
+    return fetchJson<ProductBomVersion[]>(
+      `/api/management/products/${encodeURIComponent(productId)}/boms`
+    );
+  },
+
   async saveCatalogueProduct(payload: {
     id?: string;
     sku: string;
@@ -592,8 +601,10 @@ export const orderAuditService = {
     unit: string;
     reorderLevel: number;
     isActive?: boolean;
-    bomItems: Array<{ materialId: string; quantityPerUnit: number }>;
-  }): Promise<{ id: string }> {
+    bomApprovalStatus?: 'APPROVED' | 'DRAFT';
+    bomEffectiveDate?: string;
+    bomItems: Array<{ materialId: string; quantityPerUnit: number; unit?: string }>;
+  }): Promise<{ id: string; bomVersion?: string }> {
     if (payload.id) {
       return fetchJson(`/api/management/products/${encodeURIComponent(payload.id)}`, {
         method: 'PUT',
@@ -610,6 +621,73 @@ export const orderAuditService = {
     return fetchJson(`/api/management/products/${encodeURIComponent(productId)}/status`, {
       method: 'PATCH',
       body: JSON.stringify({ isActive }),
+    });
+  },
+
+  async listMaterialsCatalogue(): Promise<InventoryItem[]> {
+    return fetchJson<InventoryItem[]>('/api/management/materials');
+  },
+
+  async saveMaterial(payload: {
+    id?: string;
+    sku: string;
+    name: string;
+    category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+    unit: string;
+    reorderLevel: number;
+    isActive?: boolean;
+  }): Promise<{ id: string }> {
+    if (payload.id) {
+      return fetchJson(`/api/management/materials/${encodeURIComponent(payload.id)}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+    }
+    return fetchJson('/api/management/materials', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async toggleMaterialStatus(materialId: string, isActive: boolean): Promise<{ id: string }> {
+    return fetchJson(`/api/management/materials/${encodeURIComponent(materialId)}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify({ isActive }),
+    });
+  },
+
+  async deleteMaterial(materialId: string): Promise<{ id: string; deleted: boolean }> {
+    return fetchJson(`/api/management/materials/${encodeURIComponent(materialId)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  async listMaterialProposals(): Promise<MaterialProposal[]> {
+    return fetchJson<MaterialProposal[]>('/api/material-proposals');
+  },
+
+  async createMaterialProposal(payload: {
+    name: string;
+    suggestedSku?: string;
+    category: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+    unit: string;
+    suggestedReorderLevel?: number;
+    reason: string;
+  }): Promise<{ id: string; proposalNumber: string }> {
+    return fetchJson('/api/material-proposals', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async reviewMaterialProposal(
+    proposalId: string,
+    decision: 'APPROVE' | 'REJECT',
+    payload?: { sku?: string; reorderLevel?: number; note?: string }
+  ): Promise<{ id: string; proposalNumber: string; status: string; createdMaterialId?: string }> {
+    return fetchJson(`/api/material-proposals/${encodeURIComponent(proposalId)}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ decision, ...(payload ?? {}) }),
     });
   },
 
@@ -829,5 +907,168 @@ export const orderAuditService = {
     if (filters?.status) qs.set('status', filters.status);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return fetchJson<OwnerReportsData>(`/api/owner/reports${suffix}`);
+  },
+
+  // --- Verified Product Proposal, Approval & Governed Catalogue Registration ---
+  async listProductProposals(): Promise<ProductProposal[]> {
+    return fetchJson<ProductProposal[]>('/api/product-proposals');
+  },
+
+  async createProductProposal(payload: {
+    productName: string;
+    description?: string;
+    packSize: string;
+    unit?: string;
+    productCategory?: string;
+    proposedSellingPrice?: number;
+    proposedReorderLevel?: number;
+    submitForProductionVerification?: boolean;
+  }): Promise<ProductProposal> {
+    return fetchJson<ProductProposal>('/api/product-proposals', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async verifyProductProposalProduction(
+    proposalId: string,
+    payload: {
+      productName?: string;
+      packSize?: string;
+      unit?: string;
+      productCategory?: string;
+      productionFeasibility: 'FEASIBLE' | 'REQUIRES_EQUIPMENT' | 'NOT_FEASIBLE';
+      expectedYieldPercent?: number;
+      productionInstructions?: string;
+      productionRemarks?: string;
+      bomItems: Array<{
+        itemType: 'EXISTING_MATERIAL' | 'NEW_MATERIAL';
+        materialId?: string;
+        materialName?: string;
+        materialCategory?: 'RAW_MATERIAL' | 'PACKAGING_MATERIAL';
+        unit?: string;
+        suggestedReorderLevel?: number;
+        quantityPerUnit: number;
+        notes?: string;
+      }>;
+      verify: boolean;
+    }
+  ): Promise<ProductProposal> {
+    return fetchJson<ProductProposal>(
+      `/api/product-proposals/${encodeURIComponent(proposalId)}/production-verify`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  async verifyProductProposalAccountant(
+    proposalId: string,
+    payload: {
+      decision: 'VERIFY' | 'RETURN';
+      hsnCode?: string;
+      gstRate?: number;
+      taxClassification?: string;
+      estimatedCost?: number;
+      costingNotes?: string;
+      remarks?: string;
+    }
+  ): Promise<ProductProposal> {
+    return fetchJson<ProductProposal>(
+      `/api/product-proposals/${encodeURIComponent(proposalId)}/accountant-verify`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  async submitOwnerProductDecision(
+    proposalId: string,
+    payload: {
+      decision: 'APPROVE' | 'REJECT' | 'RETURN';
+      sellingPrice?: number;
+      reorderLevel?: number;
+      targetStage?: 'PRODUCTION' | 'ACCOUNTANT';
+      remarks?: string;
+    }
+  ): Promise<ProductProposal> {
+    return fetchJson<ProductProposal>(
+      `/api/product-proposals/${encodeURIComponent(proposalId)}/owner-decision`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  async registerMissingMaterialFromProposal(
+    proposalId: string,
+    bomLineId: string,
+    sku: string
+  ): Promise<ProductProposal> {
+    return fetchJson<ProductProposal>(
+      `/api/product-proposals/${encodeURIComponent(proposalId)}/register-material`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ bomLineId, sku }),
+      }
+    );
+  },
+
+  async registerProductFromProposal(
+    proposalId: string,
+    payload: {
+      sku: string;
+      imageUrl?: string;
+      activateImmediately?: boolean;
+    }
+  ): Promise<ProductProposal> {
+    return fetchJson<ProductProposal>(
+      `/api/product-proposals/${encodeURIComponent(proposalId)}/register-product`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  async raiseAdminProposalCorrection(
+    proposalId: string,
+    payload: {
+      targetDepartment: 'PRODUCTION' | 'ACCOUNTANT' | 'OWNER';
+      remarks: string;
+    }
+  ): Promise<ProductProposal> {
+    return fetchJson<ProductProposal>(
+      `/api/product-proposals/${encodeURIComponent(proposalId)}/admin-correction`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  async approveBomRevisionByOwner(
+    revisionId: string,
+    approve: boolean,
+    note?: string
+  ): Promise<{ id: string; requestNumber: string; ownerApprovalStatus: string }> {
+    return fetchJson(`/api/bom-revisions/${encodeURIComponent(revisionId)}/owner-approve`, {
+      method: 'POST',
+      body: JSON.stringify({ approve, note }),
+    });
+  },
+
+  async verifyBomRevisionCosting(
+    revisionId: string,
+    approve: boolean,
+    note?: string
+  ): Promise<{ id: string; requestNumber: string; accountantVerificationStatus: string }> {
+    return fetchJson(`/api/bom-revisions/${encodeURIComponent(revisionId)}/accountant-verify`, {
+      method: 'POST',
+      body: JSON.stringify({ approve, note }),
+    });
   },
 };
