@@ -8,6 +8,7 @@ import { OrderDetailDrawer } from './components/orders/OrderDetailDrawer';
 import { OrdersPageView } from './components/orders/OrdersPageView';
 import { ProductionStockView } from './components/production/ProductionStockView';
 import { AccountantPortalView } from './components/roles/AccountantPortalView';
+import { OwnerPortalView } from './components/roles/OwnerPortalView';
 import { SupervisorPortalView } from './components/roles/SupervisorPortalView';
 import { SalesmanPortalView } from './components/salesman/SalesmanPortalView';
 import {

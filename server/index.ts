@@ -843,7 +843,11 @@ export function createApiHandler(db: DatabaseSync) {
         return sendJson(
           res,
           200,
-          updateOwnerApprovalLimit(db, authed, Number(body.approvalLimitRupees))
+          updateOwnerApprovalLimit(
+            db,
+            authed,
+            Number(body.approvalLimitRupees ?? body.limitRupees)
+          )
         );
       }
 

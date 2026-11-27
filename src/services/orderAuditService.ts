@@ -808,11 +808,11 @@ export const orderAuditService = {
   },
 
   async updateOwnerApprovalLimit(
-    limitRupees: number
+    approvalLimitRupees: number
   ): Promise<{ approvalLimitRupees: number }> {
     return fetchJson<{ approvalLimitRupees: number }>('/api/owner/settings/approval-limit', {
       method: 'PUT',
-      body: JSON.stringify({ limitRupees }),
+      body: JSON.stringify({ approvalLimitRupees }),
     });
   },
 
